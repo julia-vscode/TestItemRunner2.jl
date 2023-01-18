@@ -7,20 +7,23 @@ struct Range
     start::Position
     stop::Position
 end
+function Range(d::Dict)
+    Range(Position(d["start"]), Position(d["end"]))
+end
 function JSON.lower(a::Range)
     Dict("start" => a.start, "end" => a.stop)
 end
 
-@dict_readable struct Location
+JSONRPC.@dict_readable  struct Location
     uri::String
     range::Range
 end
 
-@dict_readable struct TestMessage
+JSONRPC.@dict_readable struct TestMessage
     message::String
     # expectedOutput?: string;
     # actualOutput?: string;
-    location::Union{Nothing,Location}
+    location::Union{Missing,Location}
 end
 
 JSONRPC.@dict_readable struct TestserverRunTestitemRequestParams <: JSONRPC.Outbound
@@ -35,8 +38,8 @@ end
 
 JSONRPC.@dict_readable struct TestserverRunTestitemRequestParamsReturn <: JSONRPC.Outbound
     status::String
-    message::Union{Vector{TestMessage},Nothing}
-    duration::Union{Float64,Nothing}
+    message::Union{Vector{TestMessage},Missing}
+    duration::Union{Float64,Missing}
 end
 
 const testserver_revise_request_type = JSONRPC.RequestType("testserver/revise", Nothing, String)

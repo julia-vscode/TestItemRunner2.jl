@@ -152,7 +152,7 @@ function run_testitem_handler(conn, params::TestserverRunTestitemRequestParams)
     try
         Test.finish(ts)
 
-        return TestserverRunTestitemRequestParamsReturn("passed", nothing, elapsed_time)
+        return TestserverRunTestitemRequestParamsReturn("passed", missing, elapsed_time)
     catch err
         if err isa Test.TestSetException
             failed_tests = Test.filter_errors(ts)

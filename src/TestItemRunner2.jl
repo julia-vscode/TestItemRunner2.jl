@@ -1,10 +1,36 @@
 module TestItemRunner2
 
-include("pkg_imports.jl")
+export @run_package_tests, @testitem
+
+# For easier dev, switch these two lines
+const pkg_root = "../packages"
+# const pkg_root = joinpath(homedir(), ".julia", "dev")
+
+import JSON, JSONRPC, ProgressMeter, CSTParser, TOML, UUIDs, Sockets, JuliaWorkspaces
+using TestItems
+
+module TestItemDetection
+    import CSTParser
+    using CSTParser: EXPR
+
+    import JuliaWorkspaces
+    using JuliaWorkspaces: JuliaWorkspace
+    using JuliaWorkspaces.URIs2: URI, filepath2uri, uri2filepath
+
+    import ..pkg_root
+
+    include(joinpath(pkg_root, "TestItemDetection", "src", "packagedef.jl"))
+end
+
+using CSTParser: EXPR, parentof, headof
+using JSONRPC: @dict_readable
+using .TestItemDetection: find_test_detail!
+using JuliaWorkspaces: JuliaWorkspace
+using JuliaWorkspaces.URIs2: filepath2uri, uri2filepath
 
 include("vendored_code.jl")
 
-export @run_package_tests, @testitem
+include(joinpath(pkg_root, "TestItemServer", "src", "testserver_protocol.jl"))
 
 function compute_line_column(content, target_pos)
     line = 1
@@ -25,19 +51,19 @@ function compute_line_column(content, target_pos)
     return (line=line, column=column)
 end
 
-# @testitem "compute_line_column" begin
-#     content = "abc\ndef\nghi"
+@testitem "compute_line_column" begin
+    content = "abc\ndef\nghi"
 
-#     @test TestItemRunner.compute_line_column(content, 1) == (line=1, column=1)
-#     @test TestItemRunner.compute_line_column(content, 2) == (line=1, column=2)
-#     @test TestItemRunner.compute_line_column(content, 3) == (line=1, column=3)
-#     @test TestItemRunner.compute_line_column(content, 5) == (line=2, column=1)
-#     @test TestItemRunner.compute_line_column(content, 6) == (line=2, column=2)
-#     @test TestItemRunner.compute_line_column(content, 7) == (line=2, column=3)
-#     @test TestItemRunner.compute_line_column(content, 9) == (line=3, column=1)
-#     @test TestItemRunner.compute_line_column(content, 10) == (line=3, column=2)
-#     @test TestItemRunner.compute_line_column(content, 11) == (line=3, column=3)
-# end
+    @test TestItemRunner.compute_line_column(content, 1) == (line=1, column=1)
+    @test TestItemRunner.compute_line_column(content, 2) == (line=1, column=2)
+    @test TestItemRunner.compute_line_column(content, 3) == (line=1, column=3)
+    @test TestItemRunner.compute_line_column(content, 5) == (line=2, column=1)
+    @test TestItemRunner.compute_line_column(content, 6) == (line=2, column=2)
+    @test TestItemRunner.compute_line_column(content, 7) == (line=2, column=3)
+    @test TestItemRunner.compute_line_column(content, 9) == (line=3, column=1)
+    @test TestItemRunner.compute_line_column(content, 10) == (line=3, column=2)
+    @test TestItemRunner.compute_line_column(content, 11) == (line=3, column=3)
+end
 
 mutable struct TestProcess
     key

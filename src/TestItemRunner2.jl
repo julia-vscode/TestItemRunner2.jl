@@ -54,15 +54,15 @@ end
 @testitem "compute_line_column" begin
     content = "abc\ndef\nghi"
 
-    @test TestItemRunner.compute_line_column(content, 1) == (line=1, column=1)
-    @test TestItemRunner.compute_line_column(content, 2) == (line=1, column=2)
-    @test TestItemRunner.compute_line_column(content, 3) == (line=1, column=3)
-    @test TestItemRunner.compute_line_column(content, 5) == (line=2, column=1)
-    @test TestItemRunner.compute_line_column(content, 6) == (line=2, column=2)
-    @test TestItemRunner.compute_line_column(content, 7) == (line=2, column=3)
-    @test TestItemRunner.compute_line_column(content, 9) == (line=3, column=1)
-    @test TestItemRunner.compute_line_column(content, 10) == (line=3, column=2)
-    @test TestItemRunner.compute_line_column(content, 11) == (line=3, column=3)
+    @test TestItemRunner2.compute_line_column(content, 1) == (line=1, column=1)
+    @test TestItemRunner2.compute_line_column(content, 2) == (line=1, column=2)
+    @test TestItemRunner2.compute_line_column(content, 3) == (line=1, column=3)
+    @test TestItemRunner2.compute_line_column(content, 5) == (line=2, column=1)
+    @test TestItemRunner2.compute_line_column(content, 6) == (line=2, column=2)
+    @test TestItemRunner2.compute_line_column(content, 7) == (line=2, column=3)
+    @test TestItemRunner2.compute_line_column(content, 9) == (line=3, column=1)
+    @test TestItemRunner2.compute_line_column(content, 10) == (line=3, column=2)
+    @test TestItemRunner2.compute_line_column(content, 11) == (line=3, column=3)
 end
 
 mutable struct TestProcess

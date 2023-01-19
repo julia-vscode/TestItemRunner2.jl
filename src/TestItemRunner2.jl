@@ -171,7 +171,7 @@ function execute_test(test_process, testitem)
             test_process.connection,
             testserver_run_testitem_request_type,
             TestserverRunTestitemRequestParams(
-                filepath2uri(testitem.filename),
+                string(filepath2uri(testitem.filename)),
                 testitem.name,
                 testitem.package_name,
                 testitem.option_default_imports,
@@ -205,6 +205,9 @@ function run_tests(path; filter=nothing, verbose=false)
         end
     end
 
+    # Construct a JuliaWorkspace
+    jw = JuliaWorkspace(Set([filepath2uri(path)]))
+
     # Find all @testitems and @testsetup
     testitems = []
     # testsetups maps @testsetup NAME => (filename, code, name, line, column)
@@ -213,22 +216,21 @@ function run_tests(path; filter=nothing, verbose=false)
         content = read(file, String)
         cst = CSTParser.parse(content, true)
 
-        testitems_for_file = []
-        testsetups_for_file = []
-        errors_for_file = []
-        for i in cst.args
-            TestItemDetection.find_test_detail!(i, testitems_for_file, testsetups_for_file,  errors_for_file)
-        end
+        ret = TestItemDetection.find_tests_in_file!(jw, filepath2uri(file), cst, "")
 
-        if length(errors_for_file) > 0
+        if length(ret.testerrors) > 0
             error("There is an error in your test item or test setup definition, we are aborting.")
         end
 
-        if length(testitems_for_file) > 0
-            # TODO Replace with proper logic to find pacakge/project info
-            append!(testitems, [(;i..., filename=file, code=content[i.code_range], project_path="", package_path=joinpath(homedir(), ".julia", "dev", "InlineStrings"), package_name="InlineStrings") for i in testitems_for_file])
-        end
-        for i in testsetups_for_file
+        append!(
+            testitems,
+            (; i..., filename=file, code=content[i.code_range], project_path=ret.project_uri !== nothing ? uri2filepath(ret.project_uri) : "", package_path = ret.package_uri !==nothing ? uri2filepath(ret.package_uri) : "", package_name=ret.package_name) for i in ret.testitems
+        )
+
+        for i in ret.testsetups
+            if haskey(testsetups, i.name)
+                error("The name '$(i.name)' is used for more than one test setup.")
+            end
             testsetups[i.name] = (filename=file, code=content[i.code_range], name=Symbol(i.name), compute_line_column(content, i.code_range.start)...)
         end
     end
@@ -264,6 +266,8 @@ function run_tests(path; filter=nothing, verbose=false)
         push!(executed_testitems, (testitem=testitem, result=result_channel, progress_reported_channel=progress_reported_channel))
     end
 
+    yield()
+
     for i in executed_testitems
         wait(i.result)
     end
@@ -286,6 +290,8 @@ function run_tests(path; filter=nothing, verbose=false)
     for i in executed_testitems
         wait(i.progress_reported_channel)
     end
+
+    println("$(length(responses)) tests passed.")
 end
 
 function kill_test_processes()

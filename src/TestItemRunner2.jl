@@ -66,7 +66,7 @@ function launch_new_process(testitem)
 
     testserver_script = joinpath(@__DIR__, "testserver_main.jl")
 
-    jl_process = open(Cmd(`julia --startup-file=no --history-file=no --depwarn=no $testserver_script $pipe_name $(key.project_path) $(key.package_path) $(key.package_name)`))
+    jl_process = open(Cmd(`$(Base.julia_cmd()) --startup-file=no --history-file=no --depwarn=no $testserver_script $pipe_name $(key.project_path) $(key.package_path) $(key.package_name)`))
 
     socket = Sockets.accept(server)
 
@@ -90,8 +90,6 @@ function launch_new_process(testitem)
         i = findfirst(isequal(test_process), test_processes)
 
         popat!(test_processes, i)
-
-        @info "Successfully removed process from tracking"
     catch err
         Base.display_error(err, catch_backtrace())
     end

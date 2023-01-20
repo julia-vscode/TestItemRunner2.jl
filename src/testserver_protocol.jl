@@ -31,6 +31,7 @@ JSONRPC.@dict_readable struct TestserverRunTestitemRequestParams <: JSONRPC.Outb
     name::String
     packageName::String
     useDefaultUsings::Bool
+    testsetups::Vector{String}
     line::Int
     column::Int
     code::String
@@ -42,5 +43,18 @@ JSONRPC.@dict_readable struct TestserverRunTestitemRequestParamsReturn <: JSONRP
     duration::Union{Float64,Missing}
 end
 
+JSONRPC.@dict_readable struct TestsetupDetails <: JSONRPC.Outbound
+    name::String
+    uri::String
+    line::Int
+    column::Int
+    code::String
+end
+
+JSONRPC.@dict_readable struct TestserverUpdateTestsetupsRequestParams <: JSONRPC.Outbound
+    testsetups::Vector{TestsetupDetails}
+end
+
 const testserver_revise_request_type = JSONRPC.RequestType("testserver/revise", Nothing, String)
 const testserver_run_testitem_request_type = JSONRPC.RequestType("testserver/runtestitem", TestserverRunTestitemRequestParams, TestserverRunTestitemRequestParamsReturn)
+const testserver_update_testsetups_type = JSONRPC.RequestType("testserver/updateTestsetups", TestserverUpdateTestsetupsRequestParams, Nothing)

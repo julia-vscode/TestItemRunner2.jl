@@ -184,13 +184,25 @@ function get_free_testprocess(testitem)
     end
 end
 
-function execute_test(test_process, testitem)
+function execute_test(test_process, testitem, testsetups)
 
     test_process.current_testitem = testitem
 
     return_value = Channel(1)
 
     @async try
+        JSONRPC.send(
+            test_process.connection,
+            testserver_update_testsetups_type,
+            TestserverUpdateTestsetupsRequestParams([TestsetupDetails(
+                k,
+                string(v.uri),
+                1,
+                1,
+                v.code
+            ) for (k,v) in testsetups])
+        )
+
         result = JSONRPC.send(
             test_process.connection,
             testserver_run_testitem_request_type,
@@ -199,6 +211,7 @@ function execute_test(test_process, testitem)
                 testitem.name,
                 testitem.package_name,
                 testitem.option_default_imports,
+                convert(Vector{String}, string.(testitem.option_setup)),
                 # TODO use proper location info here
                 1, #pos.line,
                 1, #pos.column,
@@ -234,8 +247,8 @@ function run_tests(path; filter=nothing, verbose=false)
 
     # Find all @testitems and @testsetup
     testitems = []
-    # testsetups maps @testsetup NAME => (filename, code, name, line, column)
-    testsetups = Dict{String,Any}()
+    # testsetups maps @testsetup PACKAGE => NAME => (filename, code, name, line, column)
+    testsetups = Dict{JuliaWorkspaces.URIs2.URI,Dict{String,Any}}()
     for file in julia_files
         content = read(file, String)
         cst = CSTParser.parse(content, true)
@@ -248,14 +261,19 @@ function run_tests(path; filter=nothing, verbose=false)
 
         append!(
             testitems,
-            (; i..., filename=file, code=content[i.code_range], project_path=ret.project_uri !== nothing ? uri2filepath(ret.project_uri) : "", package_path = ret.package_uri !==nothing ? uri2filepath(ret.package_uri) : "", package_name=ret.package_name) for i in ret.testitems
+            (; i..., filename=file, code=content[i.code_range], project_path=ret.project_uri !== nothing ? uri2filepath(ret.project_uri) : "", package_uri = ret.package_uri, package_path = ret.package_uri !==nothing ? uri2filepath(ret.package_uri) : "", package_name=ret.package_name) for i in ret.testitems
         )
 
         for i in ret.testsetups
-            if haskey(testsetups, i.name)
+            if !haskey(testsetups, ret.package_uri)
+                testsetups[ret.package_uri] = Dict{String,Any}()
+            end
+
+
+            if haskey(testsetups[ret.package_uri], i.name)
                 error("The name '$(i.name)' is used for more than one test setup.")
             end
-            testsetups[i.name] = (filename=file, code=content[i.code_range], name=Symbol(i.name), compute_line_column(content, i.code_range.start)...)
+            testsetups[ret.package_uri][i.name] = (filename=file, uri=filepath2uri(file), code=content[i.code_range], name=Symbol(i.name), compute_line_column(content, i.code_range.start)...)
         end
     end
 
@@ -269,13 +287,13 @@ function run_tests(path; filter=nothing, verbose=false)
 
     executed_testitems = []
 
-    p = ProgressMeter.Progress(length(testitems), barlen=50)    
+    p = ProgressMeter.Progress(length(testitems), barlen=50)
 
     # Loop over all test items that should be executed
     for testitem in testitems
         test_process = get_free_testprocess(testitem)
 
-        result_channel = execute_test(test_process, testitem)
+        result_channel = execute_test(test_process, testitem, testsetups[testitem.package_uri])
 
         progress_reported_channel = Channel(1)
 

@@ -3,7 +3,7 @@ function uri2filepath(uri::AbstractString)
     parsed_uri = try
         URIParser.URI(uri)
     catch
-        throw(LSUriConversionFailure("Cannot parse `$uri`."))
+        error("Cannot parse `$uri`.")
     end
 
     if parsed_uri.scheme !== "file"

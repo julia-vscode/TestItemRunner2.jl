@@ -9,6 +9,32 @@ include("testserver_protocol.jl")
 include("helper.jl")
 
 const conn_endpoint = Ref{Union{Nothing,JSONRPC.JSONRPCEndpoint}}(nothing)
+const TESTSETUPS = Dict{Symbol,Any}()
+
+function run_update_testsetups(conn, params::TestserverUpdateTestsetupsRequestParams)
+    new_testsetups = Dict(i.name => i for i in params.testsetups)
+
+    # Delete all existing test setups that are not in the new list
+    for i in keys(TESTSETUPS)
+        if !haskey(new_testsetups, i)
+            delete!(TESTSETUPS, i)
+        end
+    end
+
+    for i in params.testsetups
+        # We only add new if not there before or if the code changed
+        if !haskey(TESTSETUPS, i.name) || (haskey(TESTSETUPS, i.name) && TESTSETUPS[i.name].code != i.code)
+                TESTSETUPS[Symbol(i.name)] = (
+                    name = i.name,
+                    uri = i.uri,
+                    line = i.line,
+                    column = i.column,
+                    code = i.code,
+                    evaled = false
+                )
+        end
+    end
+end
 
 function withpath(f, path)
     tls = task_local_storage()
@@ -53,6 +79,73 @@ function format_error_message(err, bt)
 end
 
 function run_testitem_handler(conn, params::TestserverRunTestitemRequestParams)
+    for i in params.testsetups
+        if !haskey(TESTSETUPS, Symbol(i))
+            ret = TestserverRunTestitemRequestParamsReturn(
+                "errored",
+                [
+                    TestMessage(
+                        "The specified testsetup $i does not exist.",
+                        Location(
+                            params.uri,
+                            Range(Position(params.line, 0), Position(params.line, 0))
+                        )
+                    )
+                ],
+                missing
+            )
+            return ret
+        end
+
+        setup_details = TESTSETUPS[Symbol(i)]
+
+        if !setup_details.evaled
+            mod = Core.eval(Main.Testsetups, :(module $(Symbol(i)) end))
+
+            code = string('\n'^setup_details.line, ' '^setup_details.column, setup_details.code)
+
+            filepath = uri2filepath(setup_details.uri)
+
+            t0 = time_ns()
+            try                
+                withpath(filepath) do
+                    Base.invokelatest(include_string, mod, code, filepath)
+                end
+            catch err
+                elapsed_time = (time_ns() - t0) / 1e6 # Convert to milliseconds
+        
+                bt = catch_backtrace()
+                st = stacktrace(bt)
+        
+                error_message = format_error_message(err, bt)
+        
+                if err isa LoadError
+                    error_filepath = err.file
+                    error_line = err.line
+                else
+                    error_filepath =  string(st[1].file)
+                    error_line = st[1].line
+                end
+        
+                return TestserverRunTestitemRequestParamsReturn(
+                    "errored",
+                    [
+                        TestMessage(
+                            error_message,
+                            Location(
+                                isabspath(error_filepath) ? filepath2uri(error_filepath) : "",
+                                Range(Position(max(0, error_line - 1), 0), Position(max(0, error_line - 1), 0))
+                            )
+                        )
+                    ],
+                    elapsed_time
+                )
+            end
+        end
+    end
+
+    @info "AND WE GOT PAST THIS"
+
     mod = Core.eval(Main, :(module $(gensym()) end))
 
     if params.useDefaultUsings
@@ -178,6 +271,7 @@ function serve_in_env(conn)
 
     msg_dispatcher[testserver_revise_request_type] = run_revise_handler
     msg_dispatcher[testserver_run_testitem_request_type] = run_testitem_handler
+    msg_dispatcher[testserver_update_testsetups_type] = run_update_testsetups
 
     while conn_endpoint[] isa JSONRPC.JSONRPCEndpoint && isopen(conn)
         msg = JSONRPC.get_next_message(conn_endpoint[])
@@ -206,6 +300,10 @@ function serve(conn, project_path, package_path, package_name; is_dev=false, cra
             serve_in_env(conn)
         end
     end
+end
+
+function __init__()
+    Core.eval(Main, :(module Testsetups end))
 end
 
 end

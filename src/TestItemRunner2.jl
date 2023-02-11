@@ -132,11 +132,19 @@ function get_free_testprocess(testitem, max_num_processes)
     end
 end
 
-function execute_test(test_process, testitem, testsetups)
+function execute_test(test_process, testitem, testsetups, timeout)
 
     test_process.current_testitem = testitem
 
     return_value = Channel(1)
+
+    finished = false
+
+    timer = timeout>0 ? Timer(timeout) do i
+        if !finished
+            kill(test_process.process)
+        end
+    end : nothing
 
     @async try
         JSONRPC.send(
@@ -167,19 +175,30 @@ function execute_test(test_process, testitem, testsetups)
             )
         )
 
+        finished = true
+
+        timer === nothing || close(timer)
+
         test_process.current_testitem = nothing
 
         notify(SOME_TESTITEM_FINISHED)
 
         push!(return_value, result)
     catch err
-        Base.display_error(err, catch_backtrace())
+        if err isa InvalidStateException
+
+            notify(SOME_TESTITEM_FINISHED)
+
+            push!(return_value, (status="timeout", message="The test timed out"))
+        else
+            Base.display_error(err, catch_backtrace())
+        end
     end
 
     return return_value
 end
 
-function run_tests(path; filter=nothing, verbose=false, max_workers::Int=Sys.CPU_THREADS)
+function run_tests(path; filter=nothing, verbose=false, max_workers::Int=Sys.CPU_THREADS, timeout=60*5)
     jw = JuliaWorkspace(Set([filepath2uri(path)]))
 
     count(Iterators.flatten(values(jw._testerrors))) > 0 && error("There is an error in your test item or test setup definition, we are aborting.")
@@ -210,7 +229,7 @@ function run_tests(path; filter=nothing, verbose=false, max_workers::Int=Sys.CPU
     for testitem in testitems
         test_process = get_free_testprocess(testitem, max_workers)
 
-        result_channel = execute_test(test_process, testitem, get(()->Dict{Symbol,Any}(), testsetups, testitem.detail.package_uri))
+        result_channel = execute_test(test_process, testitem, get(()->Dict{Symbol,Any}(), testsetups, testitem.detail.package_uri), timeout)
 
         progress_reported_channel = Channel(1)
 
@@ -234,11 +253,14 @@ function run_tests(path; filter=nothing, verbose=false, max_workers::Int=Sys.CPU
     responses = [(testitem=i.testitem, result=take!(i.result)) for i in executed_testitems]
 
     count_success = 0
+    count_timeout = 0
     count_fail = 0
 
     for i in responses
         if i.result.status=="passed"
             count_success += 1
+        elseif i.result.status=="timeout"
+            count_timeout += 1
         elseif i.result.message!==missing
             count_fail += 1
             println("Errors for test $(i.testitem.detail.name)")
@@ -252,7 +274,7 @@ function run_tests(path; filter=nothing, verbose=false, max_workers::Int=Sys.CPU
         wait(i.progress_reported_channel)
     end
 
-    println("$(length(responses)) tests ran, $(count_success) passed, $(count_fail) failed.")
+    println("$(length(responses)) tests ran, $(count_success) passed, $(count_fail) failed, $(count_timeout) timed out.")
 end
 
 function kill_test_processes()

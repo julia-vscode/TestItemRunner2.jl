@@ -211,7 +211,7 @@ function run_tests(path; filter=nothing, verbose=false)
     for testitem in testitems
         test_process = get_free_testprocess(testitem)
 
-        result_channel = execute_test(test_process, testitem, testsetups[testitem.detail.package_uri])
+        result_channel = execute_test(test_process, testitem, get(()->Dict{Symbol,Any}(), testsetups, testitem.detail.package_uri))
 
         progress_reported_channel = Channel(1)
 

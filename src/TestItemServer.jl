@@ -144,8 +144,6 @@ function run_testitem_handler(conn, params::TestserverRunTestitemRequestParams)
         end
     end
 
-    @info "AND WE GOT PAST THIS"
-
     mod = Core.eval(Main, :(module $(gensym()) end))
 
     if params.useDefaultUsings
@@ -188,6 +186,26 @@ function run_testitem_handler(conn, params::TestserverRunTestitemRequestParams)
                     nothing
                 )
             end
+        end
+    end
+
+    for i in params.testsetups
+        try
+            Core.eval(mod, :(using ..Testsetups: $(Symbol(i))))
+        catch
+            return TestserverRunTestitemRequestParamsReturn(
+                "errored",
+                [
+                    TestMessage(
+                        "Unable to load the `$i` testsetup.",
+                        Location(
+                            params.uri,
+                            Range(Position(params.line, 0), Position(params.line, 0))
+                        )
+                    )
+                ],
+                nothing
+            )
         end
     end
 

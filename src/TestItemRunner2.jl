@@ -1,5 +1,7 @@
 module TestItemRunner2
 
+export run_tests, kill_test_processes
+
 # For easier dev, switch these two lines
 const pkg_root = "../packages"
 # const pkg_root = joinpath(homedir(), ".julia", "dev")
@@ -85,7 +87,7 @@ function run_revise(testprocess)
     return JSONRPC.send(testprocess.connection,testserver_revise_request_type, nothing)
 end
 
-function get_free_testprocess(testitem)
+function get_free_testprocess(testitem, max_num_processes)
     key = get_key_from_testitem(testitem)
 
     if !haskey(TEST_PROCESSES, key)
@@ -120,9 +122,6 @@ function get_free_testprocess(testitem)
                     return test_process
                 end
             end
-
-            # TODO Make this somehow configurable
-            max_num_processes = 5
 
             if length(test_processes) < max_num_processes
                 return launch_new_process(testitem)
@@ -180,7 +179,7 @@ function execute_test(test_process, testitem, testsetups)
     return return_value
 end
 
-function run_tests(path; filter=nothing, verbose=false)
+function run_tests(path; filter=nothing, verbose=false, max_workers::Int=Sys.CPU_THREADS)
     jw = JuliaWorkspace(Set([filepath2uri(path)]))
 
     count(Iterators.flatten(values(jw._testerrors))) > 0 && error("There is an error in your test item or test setup definition, we are aborting.")
@@ -209,7 +208,7 @@ function run_tests(path; filter=nothing, verbose=false)
 
     # Loop over all test items that should be executed
     for testitem in testitems
-        test_process = get_free_testprocess(testitem)
+        test_process = get_free_testprocess(testitem, max_workers)
 
         result_channel = execute_test(test_process, testitem, get(()->Dict{Symbol,Any}(), testsetups, testitem.detail.package_uri))
 

@@ -67,13 +67,6 @@
             "problemMatcher": []
         },
         {
-            "label": "Pull latest version of TestItemDetection",
-            "type": "process",
-            "command": "git",
-            "args": ["subtree", "pull", "--prefix", "packages/TestItemDetection", "https://github.com/julia-vscode/TestItemDetection.jl", "main", "--squash"],
-            "problemMatcher": []
-        },
-        {
             "label": "Pull latest version of TestItemServer",
             "type": "process",
             "command": "git",

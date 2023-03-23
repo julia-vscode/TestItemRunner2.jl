@@ -21,6 +21,8 @@ mutable struct TestProcess
     process
     connection
     current_testitem
+    log_out
+    log_err
 end
 
 const TEST_PROCESSES = Dict{NamedTuple{(:project_uri,:package_uri,:package_name),Tuple{Union{URI,Nothing},URI,String}},Vector{TestProcess}}()
@@ -43,7 +45,16 @@ function launch_new_process(testitem)
 
     testserver_script = joinpath(@__DIR__, "testserver_main.jl")
 
-    jl_process = open(Cmd(`$(Base.julia_cmd()) --startup-file=no --history-file=no --depwarn=no $testserver_script $pipe_name $(key.project_uri===nothing ? "" : uri2filepath(key.project_uri)) $(uri2filepath(key.package_uri)) $(key.package_name)`))
+    buffer_out = IOBuffer()
+    buffer_err = IOBuffer()
+
+    jl_process = open(
+        pipeline(
+            Cmd(`$(Base.julia_cmd()) --startup-file=no --history-file=no --depwarn=no $testserver_script $pipe_name $(key.project_uri===nothing ? "" : uri2filepath(key.project_uri)) $(uri2filepath(key.package_uri)) $(key.package_name)`),
+            stdout = buffer_out,
+            stderr = buffer_err
+        )
+    )
 
     socket = Sockets.accept(server)
 
@@ -51,7 +62,7 @@ function launch_new_process(testitem)
 
     run(connection)
 
-    test_process = TestProcess(key, jl_process, connection, nothing)
+    test_process = TestProcess(key, jl_process, connection, nothing, buffer_out, buffer_err)
     
     if !haskey(TEST_PROCESSES, key)
         TEST_PROCESSES[key] = TestProcess[]
@@ -176,6 +187,9 @@ function execute_test(test_process, testitem, testsetups, timeout)
             )
         )
 
+        out_log = String(take!(test_process.log_out))
+        err_log = String(take!(test_process.log_err))
+
         finished = true
 
         timer === nothing || close(timer)
@@ -184,13 +198,20 @@ function execute_test(test_process, testitem, testsetups, timeout)
 
         notify(SOME_TESTITEM_FINISHED)
 
-        push!(return_value, result)
+        push!(return_value, (status = result.status, message = result.message, duration = result.duration, log_out = out_log, log_err = err_log))
     catch err
         if err isa InvalidStateException
 
-            notify(SOME_TESTITEM_FINISHED)
+            try
+                out_log = String(take!(test_process.log_out))
+                err_log = String(take!(test_process.log_err))
 
-            push!(return_value, (status="timeout", message="The test timed out"))
+                notify(SOME_TESTITEM_FINISHED)
+
+                push!(return_value, (status="timeout", message="The test timed out", log_out = out_log, log_err = err_log))
+            catch err2
+                Base.display_error(err2, catch_backtrace())
+            end
         else
             Base.display_error(err, catch_backtrace())
         end
@@ -199,7 +220,7 @@ function execute_test(test_process, testitem, testsetups, timeout)
     return return_value
 end
 
-function run_tests(path; filter=nothing, verbose=false, max_workers::Int=Sys.CPU_THREADS, timeout=60*5)
+function run_tests(path; filter=nothing, verbose=false, max_workers::Int=Sys.CPU_THREADS, timeout=60*5, return_results=false, print_failed_results=true)
     jw = JuliaWorkspace(Set([filepath2uri(path)]))
 
     count(Iterators.flatten(values(jw._testerrors))) > 0 && error("There is an error in your test item or test setup definition, we are aborting.")
@@ -226,6 +247,10 @@ function run_tests(path; filter=nothing, verbose=false, max_workers::Int=Sys.CPU
 
     p = ProgressMeter.Progress(length(testitems), barlen=50)
 
+    count_success = 0
+    count_timeout = 0
+    count_fail = 0
+
     # Loop over all test items that should be executed
     for testitem in testitems
         test_process = get_free_testprocess(testitem, max_workers)
@@ -235,8 +260,25 @@ function run_tests(path; filter=nothing, verbose=false, max_workers::Int=Sys.CPU
         progress_reported_channel = Channel(1)
 
         @async try
-            wait(result_channel)
-            ProgressMeter.next!(p, showvalues = [(Symbol("Number of processes for package '$(i.first.package_name)'"), length(i.second)) for i in TEST_PROCESSES])
+            res = fetch(result_channel)
+
+            if res.status=="passed"
+                count_success += 1
+            elseif res.status=="timeout"
+                count_timeout += 1
+            elseif res.status == "failed"
+                count_fail += 1
+            end
+
+            ProgressMeter.next!(
+                p,
+                showvalues = [
+                    (Symbol("Successful tests"), count_success),
+                    (Symbol("Failed tests"), count_fail),
+                    (Symbol("Timed out tests"), count_timeout),
+                    ((Symbol("Number of processes for package '$(i.first.package_name)'"), length(i.second)) for i in TEST_PROCESSES)...
+                ]
+            )
             push!(progress_reported_channel, true)
         catch err
             Base.display_error(err, catch_backtrace())
@@ -253,20 +295,15 @@ function run_tests(path; filter=nothing, verbose=false, max_workers::Int=Sys.CPU
 
     responses = [(testitem=i.testitem, result=take!(i.result)) for i in executed_testitems]
 
-    count_success = 0
-    count_timeout = 0
-    count_fail = 0
-
-    for i in responses
-        if i.result.status=="passed"
-            count_success += 1
-        elseif i.result.status=="timeout"
-            count_timeout += 1
-        elseif i.result.message!==missing
-            count_fail += 1
-            println("Errors for test $(i.testitem.detail.name)")
-            for j in i.result.message
-                println(j.message)
+    if print_failed_results
+        for i in responses
+            if i.result.status == "failed" && i.result.message!==missing                
+                println()
+                println("Errors for test $(i.testitem.detail.name)")
+                for j in i.result.message
+                    println(j.message)
+                end
+                println()
             end
         end
     end
@@ -276,6 +313,12 @@ function run_tests(path; filter=nothing, verbose=false, max_workers::Int=Sys.CPU
     end
 
     println("$(length(responses)) tests ran, $(count_success) passed, $(count_fail) failed, $(count_timeout) timed out.")
+
+    if return_results
+        return responses
+    else
+        return nothing
+    end
 end
 
 function kill_test_processes()

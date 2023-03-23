@@ -153,6 +153,7 @@ function execute_test(test_process, testitem, testsetups, timeout)
             TestserverUpdateTestsetupsRequestParams([TestsetupDetails(
                 string(k),
                 string(v.detail.uri),
+                # TODO use proper location info here
                 1,
                 1,
                 v.code

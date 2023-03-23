@@ -22,7 +22,7 @@ Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [compat]
 julia = "1"
-JuliaWorkspaces = "1.1"
+JuliaWorkspaces = "1.1.1"
 JSON = "0.21"
 JSONRPC = "1.3.5"
 ProgressMeter = "1.7"

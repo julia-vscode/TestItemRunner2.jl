@@ -223,7 +223,20 @@ end
 function run_tests(path; filter=nothing, verbose=false, max_workers::Int=Sys.CPU_THREADS, timeout=60*5, return_results=false, print_failed_results=true)
     jw = JuliaWorkspace(Set([filepath2uri(path)]))
 
-    count(Iterators.flatten(values(jw._testerrors))) > 0 && error("There is an error in your test item or test setup definition, we are aborting.")
+    if count(i -> true, Iterators.flatten(values(jw._testerrors))) > 0
+        println("There are errors in your test definitions, we are aborting.")
+
+        for te in Iterators.flatten(values(jw._testerrors))
+            pos = JuliaWorkspaces.get_position_from_offset(jw._text_documents[te.uri], te.range[1])
+            println()
+            println("File: $(uri2filepath(te.uri)):$(pos[1]+1)")
+            println()
+            println(te.message)
+            println()
+        end
+
+        return nothing
+    end
 
     # testsetups maps @testsetup PACKAGE => NAME => TESTSETUPdetail
     testsetups = Dict{JuliaWorkspaces.URIs2.URI,Dict{Symbol,Any}}()

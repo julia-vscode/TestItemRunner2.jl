@@ -18,7 +18,7 @@ Runs test items. This will re-use client processes from a previous call to `run_
 
 Args:
 - `path`: Filesystem path to a folder.
-- `filter`: Not implemented right now.
+- `filter`: A filter callback function that will be called for each identified test item. If the filter callback returns `true` that test item will be run, if `false` it will not run. Each call to the provided filter callback passes a named tuple argument with a number of fields that contain metadata about the specific test item. The provided information is `filename`, `name`, `tags` and `package_name`.
 - `verbose` Not implemented right now.
 - `max_workers`: Max number of child processes per identified project.
 - `timeout`: Timeout in seconds.

@@ -251,10 +251,10 @@ function run_tests(path; filter=nothing, verbose=false, max_workers::Int=Sys.CPU
     # Flat list of @testitems
     testitems = [(detail=i, code=get_text(jw._text_documents[i.uri])[i.code_range]) for i in Iterators.flatten(values(jw._testitems))]   
 
-    # # Filter @testitems
-    # if filter !== nothing
-    #     filter!(i->filter((filename=uri2filepath(i.detail.uri), name=i.detail.name, tags=i.detail.option_tags)), testitems)
-    # end
+    # Filter @testitems
+    if filter !== nothing
+        filter!(i->filter((filename=uri2filepath(i.detail.uri), name=i.detail.name, tags=i.detail.option_tags, package_name=i.detail.package_name)), testitems)
+    end
 
     executed_testitems = []
 

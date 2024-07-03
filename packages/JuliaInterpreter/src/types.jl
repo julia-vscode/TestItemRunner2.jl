@@ -6,11 +6,6 @@ which will cause all calls to be evaluated via the interpreter.
 struct Compiled end
 Base.similar(::Compiled, sz) = Compiled()  # to support similar(stack, 0)
 
-# A type used transiently in renumbering CodeInfo SSAValues (to distinguish a new SSAValue from an old one)
-struct NewSSAValue
-    id::Int
-end
-
 # Our own replacements for Core types. We need to do this to ensure we can tell the difference
 # between "data" (Core types) and "code" (our types) if we step into Core.Compiler
 struct SSAValue
@@ -56,10 +51,17 @@ function breakpointchar(bps::BreakpointState)
     return bps.condition === falsecondition ? ' ' : 'd'     # no breakpoint : disabled
 end
 
-abstract type AbstractFrameInstance end
-mutable struct DispatchableMethod
-    next::Union{Nothing,DispatchableMethod}  # linked-list representation
-    frameinstance::Union{Compiled, AbstractFrameInstance} # really a Union{Compiled, FrameInstance} but we have a cyclic dependency
+struct _FrameInstance{FrameCode}
+    framecode::FrameCode
+    sparam_vals::SimpleVector
+    enter_generated::Bool
+end
+Base.show(io::IO, instance::_FrameInstance) =
+    print(io, "FrameInstance(", scopeof(instance.framecode), ", ", instance.sparam_vals, ", ", instance.enter_generated, ')')
+
+mutable struct _DispatchableMethod{FrameCode}
+    next::Union{Nothing,_DispatchableMethod{FrameCode}}  # linked-list representation
+    frameinstance::Union{Compiled,_FrameInstance{FrameCode}} # really a Union{Compiled, FrameInstance} but we have a cyclic dependency
     sig::Type # for speed of matching, this is a *concrete* signature. `sig <: frameinstance.framecode.scope.sig`
 end
 
@@ -91,7 +93,7 @@ Important fields:
 struct FrameCode
     scope::Union{Method,Module}
     src::CodeInfo
-    methodtables::Vector{Union{Compiled,DispatchableMethod}} # line-by-line method tables for generic-function :call Exprs
+    methodtables::Vector{Union{Compiled,_DispatchableMethod{FrameCode}}} # line-by-line method tables for generic-function :call Exprs
     breakpoints::Vector{BreakpointState}
     slotnamelists::Dict{Symbol,Vector{Int}}
     used::BitSet
@@ -99,6 +101,16 @@ struct FrameCode
     report_coverage::Bool
     unique_files::Set{Symbol}
 end
+
+"""
+`FrameInstance` represents a method specialized for particular argument types.
+
+Fields:
+- `framecode`: the [`FrameCode`](@ref) for the method.
+- `sparam_vals`: the static parameter values for the method.
+"""
+const FrameInstance = _FrameInstance{FrameCode}
+const DispatchableMethod = _DispatchableMethod{FrameCode}
 
 const BREAKPOINT_EXPR = :($(QuoteNode(getproperty))($JuliaInterpreter, :__BREAKPOINT_MARKER__))
 function is_breakpoint_expr(ex::Expr)
@@ -120,7 +132,7 @@ function FrameCode(scope, src::CodeInfo; generator=false, optimize=true)
     end
     breakpoints = Vector{BreakpointState}(undef, length(src.code))
     for (i, pc_expr) in enumerate(src.code)
-        if isa(pc_expr, Expr) && is_breakpoint_expr(pc_expr)
+        if lookup_stmt(src.code, pc_expr) === __BREAK_POINT_MARKER__
             breakpoints[i] = BreakpointState()
             src.code[i] = nothing
         end
@@ -135,9 +147,24 @@ function FrameCode(scope, src::CodeInfo; generator=false, optimize=true)
 
     lt = linetable(src)
     unique_files = Set{Symbol}()
+    @static if VERSION ≥ v"1.12.0-DEV.173"
+    function pushuniquefiles!(unique_files::Set{Symbol}, lt)
+        for edge in lt.edges
+            pushuniquefiles!(unique_files, edge)
+        end
+        linetable = lt.linetable
+        if linetable === nothing
+            push!(unique_files, Base.IRShow.debuginfo_file1(lt))
+        else
+            pushuniquefiles!(unique_files, linetable)
+        end
+    end
+    pushuniquefiles!(unique_files, lt)
+    else # VERSION < v"1.12.0-DEV.173"
     for entry in lt
         push!(unique_files, entry.file)
     end
+    end # @static if
 
     framecode = FrameCode(scope, src, methodtables, breakpoints, slotnamelists, used, generator, report_coverage, unique_files)
     if scope isa Method
@@ -167,22 +194,6 @@ nstatements(framecode::FrameCode) = length(framecode.src.code)
 Base.show(io::IO, framecode::FrameCode) = print_framecode(io, framecode)
 
 """
-`FrameInstance` represents a method specialized for particular argument types.
-
-Fields:
-- `framecode`: the [`FrameCode`](@ref) for the method.
-- `sparam_vals`: the static parameter values for the method.
-"""
-struct FrameInstance <: AbstractFrameInstance
-    framecode::FrameCode
-    sparam_vals::SimpleVector
-    enter_generated::Bool
-end
-
-Base.show(io::IO, instance::FrameInstance) =
-    print(io, "FrameInstance(", scopeof(instance.framecode), ", ", instance.sparam_vals, ", ", instance.enter_generated, ')')
-
-"""
 `FrameData` holds the arguments, local variables, and intermediate execution state
 in a particular call frame.
 
@@ -204,6 +215,7 @@ struct FrameData
     ssavalues::Vector{Any}
     sparams::Vector{Any}
     exception_frames::Vector{Int}
+    current_scopes::Vector{Scope}
     last_exception::Base.RefValue{Any}
     caller_will_catch_err::Bool
     last_reference::Vector{Int}
@@ -240,7 +252,7 @@ mutable struct Frame
     assignment_counter::Int64
     caller::Union{Frame,Nothing}
     callee::Union{Frame,Nothing}
-    last_codeloc::Int32
+    last_codeloc::Int
 end
 function Frame(framecode::FrameCode, framedata::FrameData, pc=1, caller=nothing)
     if length(junk_frames) > 0
@@ -348,6 +360,7 @@ Base.show(io::IO, var::Variable) = (print(io, var.name, " = "); show(io,var.valu
 Base.isequal(var1::Variable, var2::Variable) =
     var1.value == var2.value && var1.name === var2.name && var1.isparam == var2.isparam &&
     var1.is_captured_closure == var2.is_captured_closure
+Base.:(==)(var1::Variable, var2::Variable) = isequal(var1, var2)
 
 # A type that is unique to this package for which there are no valid operations
 struct Unassigned end

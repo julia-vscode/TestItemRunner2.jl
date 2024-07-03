@@ -40,14 +40,14 @@ function whichtt(@nospecialize(tt))
         match === nothing && return nothing
         return match.method
     else
-        m = ccall(:jl_gf_invoke_lookup, Any, (Any, UInt), tt, get_world_counter())
+        m = ccall(:jl_gf_invoke_lookup, Any, (Any, Csize_t), tt, get_world_counter())
         m === nothing && return nothing
         isa(m, Method) && return m
         return m.func::Method
     end
 end
 
-instantiate_type_in_env(arg, spsig, spvals) =
+instantiate_type_in_env(arg, spsig::UnionAll, spvals::Vector{Any}) =
     ccall(:jl_instantiate_type_in_env, Any, (Any, Any, Ptr{Any}), arg, spsig, spvals)
 
 function sparam_syms(meth::Method)
@@ -85,6 +85,10 @@ function scan_ssa_use!(used::BitSet, @nospecialize(stmt))
     while iterval !== nothing
         useref, state = iterval
         val = Core.Compiler.getindex(useref)
+        if (@static VERSION < v"1.11.0-DEV.1180" && true) && isexpr(val, :call)
+            # work around for a linearization bug in Julia (https://github.com/JuliaLang/julia/pull/52497)
+            scan_ssa_use!(used, val)
+        end
         if isa(val, SSAValue)
             push!(used, val.id)
         end
@@ -132,25 +136,7 @@ end
 
 isidentical(x) = Base.Fix2(===, x)   # recommended over isequal(::Symbol) since it cannot be invalidated
 
-# is_goto_node(@nospecialize(node)) = isa(node, GotoNode) || isexpr(node, :gotoifnot)
-
-if isdefined(Core, :GotoIfNot)
-    is_GotoIfNot(@nospecialize(node)) = isa(node, Core.GotoIfNot)
-    is_gotoifnot(@nospecialize(node)) = is_GotoIfNot(node)
-else
-    is_GotoIfNot(@nospecialize(node)) = false
-    is_gotoifnot(@nospecialize(node)) = isexpr(node, :gotoifnot)
-end
-
-if isdefined(Core, :ReturnNode)
-    is_ReturnNode(@nospecialize(node)) = isa(node, Core.ReturnNode)
-    is_return(@nospecialize(node)) = is_ReturnNode(node)
-    get_return_node(@nospecialize(node)) = (node::Core.ReturnNode).val
-else
-    is_ReturnNode(@nospecialize(node)) = false
-    is_return(@nospecialize(node)) = isexpr(node, :return)
-    get_return_node(@nospecialize(node)) = node.args[1]
-end
+is_return(@nospecialize(node)) = node isa ReturnNode
 
 is_loc_meta(@nospecialize(expr), @nospecialize(kind)) = isexpr(expr, :meta) && length(expr.args) >= 1 && expr.args[1] === kind
 
@@ -184,7 +170,7 @@ function is_call(@nospecialize(node))
         (isexpr(node, :(=)) && (isexpr(node.args[2], :call)))
 end
 
-is_call_or_return(@nospecialize(node)) = is_call(node) || is_return(node)
+is_call_or_return(@nospecialize(node)) = is_call(node) || node isa ReturnNode
 
 is_dummy(bpref::BreakpointRef) = bpref.stmtidx == 0 && bpref.err === nothing
 
@@ -193,6 +179,13 @@ function unpack_splatcall(stmt)
         return true, stmt.args[3]
     end
     return false, nothing
+end
+function unpack_splatcall(stmt, src::CodeInfo)
+    issplatcall, callee = unpack_splatcall(stmt)
+    if isa(callee, SSAValue)
+        callee = src.code[callee.id]
+    end
+    return issplatcall, callee
 end
 
 function is_bodyfunc(@nospecialize(arg))
@@ -216,6 +209,12 @@ function is_wrapper_call(@nospecialize(expr))
 end
 
 is_generated(meth::Method) = isdefined(meth, :generator)
+
+@static if VERSION < v"1.10.0-DEV.873"  # julia#48766
+    get_staged(mi::MethodInstance) = Core.Compiler.get_staged(mi)
+else
+    get_staged(mi::MethodInstance) = Core.Compiler.get_staged(mi, Base.get_world_counter())
+end
 
 """
     is_doc_expr(ex)
@@ -259,7 +258,11 @@ end
 
 # These getters improve inference since fieldtype(CodeInfo, :linetable)
 # and fieldtype(CodeInfo, :codelocs) are both Any
-const LineTypes = Union{LineNumberNode,Core.LineInfoNode}
+@static if VERSION ≥ v"1.12.0-DEV.173"
+    const LineTypes = Union{LineNumberNode,Base.IRShow.LineInfoNode}
+else
+    const LineTypes = Union{LineNumberNode,Core.LineInfoNode}
+end
 function linetable(arg)
     if isa(arg, Frame)
         arg = arg.framecode
@@ -267,20 +270,63 @@ function linetable(arg)
     if isa(arg, FrameCode)
         arg = arg.src
     end
-    return (arg::CodeInfo).linetable::Union{Vector{Core.LineInfoNode},Vector{Any}}  # issue #264
+    ci = arg::CodeInfo
+    @static if VERSION ≥ v"1.12.0-DEV.173"
+    return ci.debuginfo
+    else # VERSION < v"1.12.0-DEV.173"
+    return ci.linetable::Union{Vector{Core.LineInfoNode},Vector{Any}} # issue #264
+    end # @static if
 end
-_linetable(list::Vector, i::Integer) = list[i]::Union{Expr,LineTypes}
 function linetable(arg, i::Integer; macro_caller::Bool=false)::Union{Expr,LineTypes}
     lt = linetable(arg)
-    lineinfo = _linetable(lt, i)
+    @static if VERSION ≥ v"1.12.0-DEV.173"
+    # TODO: decode the linetable at this frame efficiently by reimplementing this here
+    # TODO: get the contextual name from the parent, rather than returning "n/a" (which breaks Cthulhu)
+    return Base.IRShow.buildLineInfoNode(lt, :var"n/a", i)[1] # ignore all inlining / macro expansion / etc :(
+    else # VERSION < v"1.12.0-DEV.173"
+    lin = lt[i]::Union{Expr,LineTypes}
     if macro_caller
-        while lineinfo isa Core.LineInfoNode && lineinfo.method === Symbol("macro expansion") && lineinfo.inlined_at != 0
-            lineinfo = _linetable(lt, lineinfo.inlined_at)
+        while lin isa Core.LineInfoNode && lin.method === Symbol("macro expansion") && lin.inlined_at != 0
+            lin = lt[lin.inlined_at]::Union{Expr,LineTypes}
         end
     end
-    return lineinfo
+    return lin
+    end # @static if
 end
 
+@static if VERSION ≥ v"1.12.0-DEV.173"
+
+getlastline(arg) = getlastline(linetable(arg))
+function getlastline(debuginfo::Core.DebugInfo)
+    while true
+        ltnext = debuginfo.linetable
+        ltnext === nothing && break
+        debuginfo = ltnext
+    end
+    lastline = 0
+    for k = 0:typemax(Int)
+        codeloc = Core.Compiler.getdebugidx(debuginfo, k)
+        line::Int = codeloc[1]
+        line < 0 && break
+        lastline = max(lastline, line)
+    end
+    return lastline
+end
+function codelocs(arg, i::Integer)
+    debuginfo = linetable(arg)
+    codeloc = Core.Compiler.getdebugidx(debuginfo, i)
+    line::Int = codeloc[1]
+    line < 0 && return 0# broken or disabled debug info?
+    if line == 0 && codeloc[2] == 0
+        return 0 # no line number update
+    end
+    return i
+end
+
+else # VERSION < v"1.12.0-DEV.173"
+
+getfirstline(arg) = getline(linetable(arg)[begin])
+getlastline(arg) = getline(linetable(arg)[end])
 function codelocs(arg)
     if isa(arg, Frame)
         arg = arg.framecode
@@ -288,9 +334,12 @@ function codelocs(arg)
     if isa(arg, FrameCode)
         arg = arg.src
     end
-    return (arg::CodeInfo).codelocs::Vector{Int32}
+    ci = arg::CodeInfo
+    return ci.codelocs
 end
-codelocs(arg, i::Integer) = codelocs(arg)[i]  # for consistency with linetable (but no extra benefit here)
+codelocs(arg, i::Integer) = codelocs(arg)[i]
+
+end # @static if
 
 function lineoffset(framecode::FrameCode)
     offset = 0
@@ -303,9 +352,9 @@ function lineoffset(framecode::FrameCode)
 end
 
 function getline(ln::Union{LineTypes,Expr})
-    _getline(ln::LineTypes) = ln.line
-    _getline(ln::Expr)      = ln.args[1] # assuming ln.head === :line
-    return Int(_getline(ln))::Int
+    _getline(ln::LineTypes) = Int(ln.line)
+    _getline(ln::Expr)      = ln.args[1]::Int # assuming ln.head === :line
+    return _getline(ln)
 end
 function getfile(ln::Union{LineTypes,Expr})
     _getfile(ln::LineTypes) = ln.file::Symbol
@@ -365,12 +414,25 @@ end
 getfile(frame::Frame, pc=frame.pc) = getfile(frame.framecode, pc)
 
 function codelocation(code::CodeInfo, idx::Int)
-    codeloc = codelocs(code)[idx]
-    while codeloc == 0 && (code.code[idx] === nothing || isexpr(code.code[idx], :meta)) && idx < length(code.code)
-        idx += 1
-        codeloc = codelocs(code)[idx]
+    idx′ = idx
+    # look ahead if we are on a meta line
+    while idx′ < length(code.code)
+        codeloc = codelocs(code, idx′)
+        codeloc == 0 || return codeloc
+        ex = code.code[idx′]
+        ex === nothing || isexpr(ex, :meta) || break
+        idx′ += 1
     end
-    return codeloc
+    idx′ = idx - 1
+    # if zero, look behind until we find where we last might have had a line
+    while idx′ > 0
+        ex = code.code[idx′]
+        codeloc = codelocs(code, idx′)
+        codeloc == 0 || return codeloc
+        idx′ -= 1
+    end
+    # for the start of the function, return index 1
+    return 1
 end
 
 function compute_corrected_linerange(method::Method)
@@ -378,13 +440,11 @@ function compute_corrected_linerange(method::Method)
     offset = line1 - method.line
     @assert !is_generated(method)
     src = JuliaInterpreter.get_source(method)
-    lastline = linetable(src)[end]::LineTypes
-    return line1:getline(lastline) + offset
+    lastline = getlastline(src)
+    return line1:lastline + offset
 end
 
-function compute_linerange(framecode)
-    getline(linetable(framecode, 1)):getline(last(linetable(framecode)))
-end
+compute_linerange(framecode) = getfirstline(framecode):getlastline(framecode)
 
 function statementnumbers(framecode::FrameCode, line::Integer, file::Symbol)
     # Check to see if this framecode really contains that line. Methods that fill in a default positional argument,
@@ -421,7 +481,6 @@ function statementnumbers(framecode::FrameCode, line::Integer, file::Symbol)
         end
         return stmtidxs
     end
-
 
     # If the exact line number does not exist in the line table, take the one that is closest after that line
     # restricted to the line range of the current scope.
@@ -494,9 +553,7 @@ breakpointchar(framecode, stmtidx) =
 function print_framecode(io::IO, framecode::FrameCode; pc=0, range=1:nstatements(framecode), kwargs...)
     iscolor = get(io, :color, false)
     ndstmt = ndigits(nstatements(framecode))
-    lt = linetable(framecode)
-    offset = lineoffset(framecode)
-    ndline = isempty(lt) ? 0 : ndigits(getline(lt[end]) + offset)
+    ndline = ndigits(getlastline(framecode) + lineoffset(framecode))
     nullline = " "^ndline
     src = copy(framecode.src)
     replace_coretypes!(src; rev=true)
@@ -734,11 +791,11 @@ function Base.StackTraces.StackFrame(frame::Frame)
     scope = scopeof(frame)
     if scope isa Method
         method = scope
-        method_args = [something(frame.framedata.locals[i]) for i in 1:method.nargs]
-        atypes = Tuple{mapany(_Typeof, method_args)...}
+        method_args = Any[something(frame.framedata.locals[i]) for i in 1:method.nargs]
+        argt = Tuple{mapany(_Typeof, method_args)...}
         sig = method.sig
-        sparams = Core.svec(frame.framedata.sparams...)
-        mi = Core.Compiler.specialize_method(method, atypes, sparams)
+        atype, sparams = ccall(:jl_type_intersection_with_env, Any, (Any, Any), argt, sig)::SimpleVector
+        mi = Core.Compiler.specialize_method(method, atype, sparams::SimpleVector)
         fname = method.name
     else
         mi = frame.framecode.src
@@ -747,12 +804,11 @@ function Base.StackTraces.StackFrame(frame::Frame)
     Base.StackFrame(
         fname,
         Symbol(getfile(frame)),
-        @something(linenumber(frame), getline(linetable(frame, 1))),
+        @something(linenumber(frame), getfirstline(frame)),
         mi,
         false,
         false,
-        C_NULL
-    )
+        C_NULL)
 end
 
 function Base.show_backtrace(io::IO, frame::Frame)

@@ -14,17 +14,19 @@ function JSON.lower(a::Range)
     Dict("start" => a.start, "end" => a.stop)
 end
 
-JSONRPC.@dict_readable  struct Location
+@dict_readable struct Location
     uri::String
     range::Range
 end
 
-JSONRPC.@dict_readable struct TestMessage
+@dict_readable struct TestMessage
     message::String
-    # expectedOutput?: string;
-    # actualOutput?: string;
-    location::Union{Missing,Location}
+    expectedOutput::Union{String,Nothing}
+    actualOutput::Union{String,Nothing}
+    location::Union{Nothing,Location}
 end
+
+TestMessage(message, location) = TestMessage(message, nothing, nothing, location)
 
 JSONRPC.@dict_readable struct TestserverRunTestitemRequestParams <: JSONRPC.Outbound
     uri::String
@@ -35,12 +37,20 @@ JSONRPC.@dict_readable struct TestserverRunTestitemRequestParams <: JSONRPC.Outb
     line::Int
     column::Int
     code::String
+    mode::String
+    coverageRoots::Union{Vector{String},Nothing}
+end
+
+JSONRPC.@dict_readable struct FileCoverage <: JSONRPC.Outbound
+    uri::String
+    coverage::Vector{Union{Int,Nothing}}
 end
 
 JSONRPC.@dict_readable struct TestserverRunTestitemRequestParamsReturn <: JSONRPC.Outbound
     status::String
-    message::Union{Vector{TestMessage},Missing}
-    duration::Union{Float64,Missing}
+    message::Union{Vector{TestMessage},Nothing}
+    duration::Union{Float64,Nothing}
+    coverage::Union{Nothing,Vector{FileCoverage}}
 end
 
 JSONRPC.@dict_readable struct TestsetupDetails <: JSONRPC.Outbound

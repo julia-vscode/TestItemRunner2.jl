@@ -3,13 +3,22 @@ module TestItemServer
 include("pkg_imports.jl")
 
 import .JSONRPC: @dict_readable
-import Test, Pkg
+import .CoverageTools: LCOV, amend_coverage_from_src!
+import Test, Pkg, Sockets
 
 include("testserver_protocol.jl")
 include("helper.jl")
+include("vscode_testset.jl")
 
 const conn_endpoint = Ref{Union{Nothing,JSONRPC.JSONRPCEndpoint}}(nothing)
+const DEBUG_SESSION = Ref{Channel{DebugAdapter.DebugSession}}()
 const TESTSETUPS = Dict{Symbol,Any}()
+
+function __init__()
+    DEBUG_SESSION[] = Channel{DebugAdapter.DebugSession}(1)
+
+    Core.eval(Main, :(module Testsetups end))
+end
 
 function run_update_testsetups(conn, params::TestserverUpdateTestsetupsRequestParams)
     new_testsetups = Dict(i.name => i for i in params.testsetups)
@@ -78,7 +87,55 @@ function format_error_message(err, bt)
     end
 end
 
+function clear_coverage_data()
+    @static if VERSION >= v"1.12.0-"
+        try
+            @ccall jl_clear_coverage_data()::Cvoid
+        catch err
+            # TODO Call global error handler
+        end
+    end
+end
+
+function collect_coverage_data!(coverage_results, roots)
+    @static if VERSION >= v"1.12.0-"
+        lcov_filename = tempname() * ".info"
+        @ccall jl_write_coverage_data(lcov_filename::Cstring)::Cvoid
+        cov_info = try
+            LCOV.readfile(lcov_filename)
+        finally
+            rm(lcov_filename)
+        end
+
+        filter!(i->isabspath(i.filename) && any(j->startswith(filepath2uri(i.filename), j), roots) && isfile(i.filename), cov_info)
+
+        append!(coverage_results, cov_info)
+    end
+end
+
+function process_coverage_data(coverage_results)
+    if length(coverage_results) == 0
+        return nothing
+    end
+
+    merged_coverage = CoverageTools.merge_coverage_counts(coverage_results)
+
+    coverage_info = FileCoverage[]
+
+    for i in merged_coverage
+        file_cov = CoverageTools.FileCoverage(i.filename, read(i.filename, String), i.coverage)
+
+        amend_coverage_from_src!(file_cov)
+
+        push!(coverage_info, FileCoverage(filepath2uri(file_cov.filename), file_cov.coverage))
+    end
+
+    return coverage_info
+end
+
 function run_testitem_handler(conn, params::TestserverRunTestitemRequestParams)
+    coverage_results = CoverageTools.FileCoverage[] # This will hold the results of various coverage sprints
+
     for i in params.testsetups
         if !haskey(TESTSETUPS, Symbol(i))
             ret = TestserverRunTestitemRequestParamsReturn(
@@ -92,7 +149,8 @@ function run_testitem_handler(conn, params::TestserverRunTestitemRequestParams)
                         )
                     )
                 ],
-                missing
+                nothing,
+                nothing
             )
             return ret
         end
@@ -107,18 +165,18 @@ function run_testitem_handler(conn, params::TestserverRunTestitemRequestParams)
             filepath = uri2filepath(setup_details.uri)
 
             t0 = time_ns()
-            try                
+            try
                 withpath(filepath) do
                     Base.invokelatest(include_string, mod, code, filepath)
                 end
             catch err
                 elapsed_time = (time_ns() - t0) / 1e6 # Convert to milliseconds
-        
+
                 bt = catch_backtrace()
                 st = stacktrace(bt)
-        
+
                 error_message = format_error_message(err, bt)
-        
+
                 if err isa LoadError
                     error_filepath = err.file
                     error_line = err.line
@@ -126,7 +184,7 @@ function run_testitem_handler(conn, params::TestserverRunTestitemRequestParams)
                     error_filepath =  string(st[1].file)
                     error_line = st[1].line
                 end
-        
+
                 return TestserverRunTestitemRequestParamsReturn(
                     "errored",
                     [
@@ -138,7 +196,8 @@ function run_testitem_handler(conn, params::TestserverRunTestitemRequestParams)
                             )
                         )
                     ],
-                    elapsed_time
+                    elapsed_time,
+                    nothing
                 )
             end
         end
@@ -161,13 +220,20 @@ function run_testitem_handler(conn, params::TestserverRunTestitemRequestParams)
                         )
                     )
                 ],
+                nothing,
                 nothing
             )
         end
 
         if params.packageName!=""
             try
-                Core.eval(mod, :(using $(Symbol(params.packageName))))
+                params.mode == "Coverage" && clear_coverage_data()
+
+                try
+                    Core.eval(mod, :(using $(Symbol(params.packageName))))
+                finally
+                    params.mode == "Coverage" && collect_coverage_data!(coverage_results, params.coverageRoots)
+                end
             catch err
                 bt = catch_backtrace()
                 error_message = format_error_message(err, bt)
@@ -183,7 +249,8 @@ function run_testitem_handler(conn, params::TestserverRunTestitemRequestParams)
                             )
                         )
                     ],
-                    nothing
+                    nothing,
+                    process_coverage_data(coverage_results)
                 )
             end
         end
@@ -204,6 +271,7 @@ function run_testitem_handler(conn, params::TestserverRunTestitemRequestParams)
                         )
                     )
                 ],
+                nothing,
                 nothing
             )
         end
@@ -222,7 +290,18 @@ function run_testitem_handler(conn, params::TestserverRunTestitemRequestParams)
     t0 = time_ns()
     try
         withpath(filepath) do
-            Base.invokelatest(include_string, mod, code, filepath)
+
+            if params.mode == "Debug"
+                debug_session = wait_for_debug_session()
+                DebugAdapter.debug_code(debug_session, mod, code, filepath, false)
+            else
+                params.mode == "Coverage" && clear_coverage_data()
+                try
+                    Base.invokelatest(include_string, mod, code, filepath)
+                finally
+                    params.mode == "Coverage" && collect_coverage_data!(coverage_results, params.coverageRoots)
+                end
+            end
             elapsed_time = (time_ns() - t0) / 1e6 # Convert to milliseconds
         end
     catch err
@@ -254,7 +333,8 @@ function run_testitem_handler(conn, params::TestserverRunTestitemRequestParams)
                     )
                 )
             ],
-            elapsed_time
+            elapsed_time,
+            process_coverage_data(coverage_results)
         )
     end
 
@@ -263,20 +343,50 @@ function run_testitem_handler(conn, params::TestserverRunTestitemRequestParams)
     try
         Test.finish(ts)
 
-        return TestserverRunTestitemRequestParamsReturn("passed", missing, elapsed_time)
+        return TestserverRunTestitemRequestParamsReturn("passed", nothing, elapsed_time, process_coverage_data(coverage_results))
     catch err
         if err isa Test.TestSetException
             failed_tests = Test.filter_errors(ts)
 
             return TestserverRunTestitemRequestParamsReturn(
                 "failed",
-                [TestMessage(sprint(Base.show, i), Location(filepath2uri(string(i.source.file)), Range(Position(i.source.line - 1, 0), Position(i.source.line - 1, 0)))) for i in failed_tests],
-                elapsed_time
+                [ create_test_message_for_failed(i) for i in failed_tests],
+                elapsed_time,
+                process_coverage_data(coverage_results)
             )
         else
             rethrow(err)
         end
     end
+end
+
+function create_test_message_for_failed(i)
+    (expected, actual) = extract_expected_and_actual(i)
+    return TestMessage(sprint(Base.show, i),
+        expected,
+        actual,
+        Location(filepath2uri(string(i.source.file)), Range(Position(i.source.line - 1, 0), Position(i.source.line - 1, 0))))
+end
+
+function extract_expected_and_actual(result)
+    if isa(result, Test.Fail)
+        s = result.data
+        if isa(s, String)
+            m = match(r"\"(.*)\" == \"(.*)\"", s)
+            if m !== nothing
+                try
+                    expected = unescape_string(m.captures[1])
+                    actual = unescape_string(m.captures[2])
+                    return (expected, actual)
+                catch err
+                    # theoretically possible if a user registers a Fail instance that matches
+                    # above regexp, but doesn't contain two escaped strings.
+                    # just return nothing in this unlikely case, meaning no diff will be shown.
+                end
+            end
+        end
+    end
+    return (nothing, nothing)
 end
 
 function serve_in_env(conn)
@@ -298,7 +408,53 @@ function serve_in_env(conn)
     end
 end
 
-function serve(conn, project_path, package_path, package_name; is_dev=false, crashreporting_pipename::Union{AbstractString,Nothing}=nothing)
+function start_debug_backend(debug_pipename, error_handler)
+    ready = Channel{Bool}(1)
+    @async try
+        server = Sockets.listen(debug_pipename)
+
+        put!(ready, true)
+
+        while true
+            conn = Sockets.accept(server)
+
+            debug_session = DebugAdapter.DebugSession(conn)
+
+            global DEBUG_SESSION
+
+            put!(DEBUG_SESSION[], debug_session)
+
+            try
+                run(debug_session, error_handler)
+            finally
+                take!(DEBUG_SESSION[])
+            end
+        end
+    catch err
+        error_handler(err, Base.catch_backtrace())
+    end
+
+    take!(ready)
+end
+
+function wait_for_debug_session()
+    fetch(DEBUG_SESSION[])
+end
+
+function get_debug_session_if_present()
+    if isready(DEBUG_SESSION[])
+        return fetch(DEBUG_SESSION[])
+    else
+        return nothing
+    end
+end
+
+function serve(pipename, debug_pipename, project_path, package_path, package_name; is_dev=false, error_handler=nothing)
+    start_debug_backend(debug_pipename, error_handler)
+
+    conn = Sockets.connect(pipename)
+
+    @info "This test server instance was started with the following configuration." project_path package_path package_name
     if project_path==""
         Pkg.activate(temp=true)
 
@@ -318,10 +474,6 @@ function serve(conn, project_path, package_path, package_name; is_dev=false, cra
             serve_in_env(conn)
         end
     end
-end
-
-function __init__()
-    Core.eval(Main, :(module Testsetups end))
 end
 
 end

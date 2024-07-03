@@ -249,7 +249,11 @@ function delete_missing!(exs_sigs_old::ExprsSigs, exs_sigs_new)
             # ex was deleted
             sigs === nothing && continue
             for sig in sigs
-                ret = Base._methods_by_ftype(sig, -1, typemax(UInt))
+                @static if VERSION ≥ v"1.10.0-DEV.873"
+                    ret = Base._methods_by_ftype(sig, -1, Base.get_world_counter())
+                else
+                    ret = Base._methods_by_ftype(sig, -1, typemax(UInt))
+                end
                 success = false
                 if !isempty(ret)
                     m = get_method_from_match(ret[end])   # the last method returned is the least-specific that matches, and thus most likely to be type-equal
@@ -311,8 +315,8 @@ function delete_missing!(mod_exs_sigs_old::ModuleExprsSigs, mod_exs_sigs_new)
 end
 
 function eval_rex(rex::RelocatableExpr, exs_sigs_old::ExprsSigs, mod::Module; mode::Symbol=:eval)
-    sigs, includes = nothing, nothing
-    with_logger(_debug_logger) do
+    return with_logger(_debug_logger) do
+        sigs, includes = nothing, nothing
         rexo = getkey(exs_sigs_old, rex, nothing)
         # extract the signatures and update the line info
         if rexo === nothing
@@ -338,9 +342,10 @@ function eval_rex(rex::RelocatableExpr, exs_sigs_old::ExprsSigs, mod::Module; mo
             # Update location info
             ln, lno = firstline(unwrap(rex)), firstline(unwrap(rexo))
             if sigs !== nothing && !isempty(sigs) && ln != lno
+                ln, lno = ln::LineNumberNode, lno::LineNumberNode
                 @debug "LineOffset" _group="Action" time=time() deltainfo=(sigs, lno=>ln)
                 for sig in sigs
-                    locdefs = CodeTracking.method_info[sig]
+                    locdefs = CodeTracking.method_info[sig]::AbstractVector
                     ld = map(pr->linediff(lno, pr[1]), locdefs)
                     idx = argmin(ld)
                     if ld[idx] === typemax(eltype(ld))
@@ -352,8 +357,8 @@ function eval_rex(rex::RelocatableExpr, exs_sigs_old::ExprsSigs, mod::Module; mo
                 end
             end
         end
+        return sigs, includes
     end
-    return sigs, includes
 end
 
 # These are typically bypassed in favor of expression-by-expression evaluation to
@@ -430,8 +435,7 @@ pop_expr!(methodinfo::CodeTrackingMethodInfo) = (pop!(methodinfo.exprstack); met
 function add_dependencies!(methodinfo::CodeTrackingMethodInfo, edges::CodeEdges, src, musteval)
     isempty(src.code) && return methodinfo
     stmt1 = first(src.code)
-    if (isexpr(stmt1, :gotoifnot) && (dep = (stmt1::Expr).args[1]; isa(dep, Union{GlobalRef,Symbol}))) ||
-       (is_GotoIfNot(stmt1) && (dep = stmt1.cond; isa(dep, Union{GlobalRef,Symbol})))
+    if isa(stmt1, Core.GotoIfNot) && (dep = stmt1.cond; isa(dep, Union{GlobalRef,Symbol}))
         # This is basically a hack to look for symbols that control definition of methods via a conditional.
         # It is aimed at solving #249, but this will have to be generalized for anything real.
         for (stmt, me) in zip(src.code, musteval)
@@ -646,7 +650,11 @@ function handle_deletions(pkgdata, file)
     idx = fileindex(pkgdata, file)
     filep = pkgdata.info.files[idx]
     if isa(filep, AbstractString)
-        filep = normpath(joinpath(basedir(pkgdata), file))
+        if file ≠ "."
+            filep = normpath(basedir(pkgdata), file)
+        else
+            filep = normpath(basedir(pkgdata))
+        end
     end
     topmod = first(keys(mexsold))
     fileok = file_exists(String(filep)::String)
@@ -976,7 +984,7 @@ This can be automated using [`entr`](@ref).
 
 `includet` is essentially shorthand for
 
-    Revise.track(Main, filename; mode=:eval, skip_include=false)
+    Revise.track(Main, filename; mode=:includet, skip_include=true)
 
 Do *not* use `includet` for packages, as those should be handled by `using` or `import`.
 If `using` and `import` aren't working, you may have packages in a non-standard location;
@@ -1222,7 +1230,7 @@ function revise_first(ex)
         isa(exu, Expr) && exu.head === :call && length(exu.args) == 1 && exu.args[1] === :exit && return ex
     end
     # Check for queued revisions, and if so call `revise` first before executing the expression
-    return Expr(:toplevel, :(isempty($revision_queue) || Base.invokelatest($revise)), ex)
+    return Expr(:toplevel, :($isempty($revision_queue) || $(Base.invokelatest)($revise)), ex)
 end
 
 steal_repl_backend(args...) = @warn "`steal_repl_backend` has been removed from Revise, please update your `~/.julia/config/startup.jl`.\nSee https://timholy.github.io/Revise.jl/stable/config/"
@@ -1237,15 +1245,19 @@ Revise itself does not need to be running on `p`.
 """
 function init_worker(p)
     remotecall(Core.eval, p, Main, quote
-        function whichtt(sig)
-            ret = Base._methods_by_ftype(sig, -1, typemax(UInt))
+        function whichtt(@nospecialize sig)
+            @static if VERSION ≥ v"1.10.0-DEV.873"
+                ret = Base._methods_by_ftype(sig, -1, Base.get_world_counter())
+            else
+                ret = Base._methods_by_ftype(sig, -1, typemax(UInt))
+            end
             isempty(ret) && return nothing
             m = ret[end][3]::Method   # the last method returned is the least-specific that matches, and thus most likely to be type-equal
             methsig = m.sig
             (sig <: methsig && methsig <: sig) || return nothing
             return m
         end
-        function delete_method_by_sig(sig)
+        function delete_method_by_sig(@nospecialize sig)
             m = whichtt(sig)
             isa(m, Method) && Base.delete_method(m)
         end
@@ -1253,6 +1265,7 @@ function init_worker(p)
 end
 
 function __init__()
+    ccall(:jl_generating_output, Cint, ()) == 1 && return nothing
     run_on_worker = get(ENV, "JULIA_REVISE_WORKER_ONLY", "0")
     if !(myid() == 1 || run_on_worker == "1")
         return nothing

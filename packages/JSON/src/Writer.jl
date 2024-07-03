@@ -20,15 +20,15 @@ struct CompositeTypeWrapper{T}
 end
 
 CompositeTypeWrapper(x, syms) = CompositeTypeWrapper(x, collect(syms))
-CompositeTypeWrapper(x) = CompositeTypeWrapper(x, fieldnames(typeof(x)))
+CompositeTypeWrapper(x) = CompositeTypeWrapper(x, propertynames(x))
 
 """
     lower(x)
 
 Return a value of a JSON-encodable primitive type that `x` should be lowered
-into before encoding as JSON. Supported types are: `AbstractDict` to JSON
-objects, `Tuple` and `AbstractVector` to JSON arrays, `AbstractArray` to nested
-JSON arrays, `AbstractString`, `Symbol`, `Enum`, or `Char` to JSON string,
+into before encoding as JSON. Supported types are: `AbstractDict` and `NamedTuple`
+to JSON objects, `Tuple` and `AbstractVector` to JSON arrays, `AbstractArray` to
+nested JSON arrays, `AbstractString`, `Symbol`, `Enum`, or `Char` to JSON string,
 `Integer` and `AbstractFloat` to JSON number, `Bool` to JSON boolean, and
 `Nothing` to JSON null, or any other types with a `show_json` method defined.
 
@@ -83,27 +83,43 @@ abstract type JSONContext <: StructuralContext end
 """
 Internal implementation detail.
 
+To handle recursive references in objects/arrays when writing, by default we want
+to track references to objects seen and break recursion cycles to avoid stack overflows.
+Subtypes of `RecursiveCheckContext` must include two fields in order to allow recursive
+cycle checking to work properly when writing:
+  * `objectids::Set{UInt64}`: set of object ids in the current stack of objects being written
+  * `recursive_cycle_token::Any`: Any string, `nothing`, or object to be written when a cycle is detected
+"""
+abstract type RecursiveCheckContext <: JSONContext end
+
+"""
+Internal implementation detail.
+
 Keeps track of the current location in the array or object, which winds and
 unwinds during serialization.
 """
-mutable struct PrettyContext{T<:IO} <: JSONContext
+mutable struct PrettyContext{T<:IO} <: RecursiveCheckContext
     io::T
     step::Int     # number of spaces to step
     state::Int    # number of steps at present
     first::Bool   # whether an object/array was just started
+    objectids::Set{UInt64}
+    recursive_cycle_token
 end
-PrettyContext(io::IO, step) = PrettyContext(io, step, 0, false)
+PrettyContext(io::IO, step, recursive_cycle_token=nothing) = PrettyContext(io, step, 0, false, Set{UInt64}(), recursive_cycle_token)
 
 """
 Internal implementation detail.
 
 For compact printing, which in JSON is fully recursive.
 """
-mutable struct CompactContext{T<:IO} <: JSONContext
+mutable struct CompactContext{T<:IO} <: RecursiveCheckContext
     io::T
     first::Bool
+    objectids::Set{UInt64}
+    recursive_cycle_token
 end
-CompactContext(io::IO) = CompactContext(io, false)
+CompactContext(io::IO, recursive_cycle_token=nothing) = CompactContext(io, false, Set{UInt64}(), recursive_cycle_token)
 
 """
 Internal implementation detail.
@@ -121,10 +137,10 @@ const SC = StructuralContext
 # Low-level direct access
 Base.write(io::JSONContext, byte::UInt8) = write(io.io, byte)
 Base.write(io::StringContext, byte::UInt8) =
-    write(io.io, ESCAPED_ARRAY[byte + 0x01])
+    write(io.io, ESCAPED_ARRAY[byte + 1])
 #= turn on if there's a performance benefit
 write(io::StringContext, char::Char) =
-    char <= '\x7f' ? write(io, ESCAPED_ARRAY[UInt8(c) + 0x01]) :
+    char <= '\x7f' ? write(io, ESCAPED_ARRAY[UInt8(c) + 1]) :
                      Base.print(io, c)
 =#
 
@@ -265,12 +281,26 @@ end
 show_json(io::SC, ::CS, ::Nothing) = show_null(io)
 show_json(io::SC, ::CS, ::Missing) = show_null(io)
 
-function show_json(io::SC, s::CS, a::AbstractDict)
-    begin_object(io)
-    for kv in a
-        show_pair(io, s, kv)
+recursive_cycle_check(f, io, s, id) = f()
+
+function recursive_cycle_check(f, io::RecursiveCheckContext, s, id)
+    if id in io.objectids
+        show_json(io, s, io.recursive_cycle_token)
+    else
+        push!(io.objectids, id)
+        f()
+        delete!(io.objectids, id)
     end
-    end_object(io)
+end
+
+function show_json(io::SC, s::CS, x::Union{AbstractDict, NamedTuple})
+    recursive_cycle_check(io, s, objectid(x)) do
+        begin_object(io)
+        for kv in pairs(x)
+            show_pair(io, s, kv)
+        end
+        end_object(io)
+    end
 end
 
 function show_json(io::SC, s::CS, kv::Pair)
@@ -280,19 +310,23 @@ function show_json(io::SC, s::CS, kv::Pair)
 end
 
 function show_json(io::SC, s::CS, x::CompositeTypeWrapper)
-    begin_object(io)
-    for fn in x.fns
-        show_pair(io, s, fn, getfield(x.wrapped, fn))
+    recursive_cycle_check(io, s, objectid(x.wrapped)) do
+        begin_object(io)
+        for fn in x.fns
+            show_pair(io, s, fn, getproperty(x.wrapped, fn))
+        end
+        end_object(io)
     end
-    end_object(io)
 end
 
 function show_json(io::SC, s::CS, x::Union{AbstractVector, Tuple})
-    begin_array(io)
-    for elt in x
-        show_element(io, s, elt)
+    recursive_cycle_check(io, s, objectid(x)) do
+        begin_array(io)
+        for elt in x
+            show_element(io, s, elt)
+        end
+        end_array(io)
     end
-    end_array(io)
 end
 
 """
@@ -351,6 +385,17 @@ print(io::IO, obj) = show_json(io, StandardSerialization(), obj)
 print(a, indent) = print(stdout, a, indent)
 print(a) = print(stdout, a)
 
+"""
+    json(a)
+    json(a, indent::Int)
+
+Creates a JSON string from a Julia object or value.
+
+Arguments:
+  • a: the Julia object or value to encode
+  • indent (optional number): if provided, pretty-print array and object
+    substructures by indenting with the provided number of spaces
+"""
 json(a) = sprint(print, a)
 json(a, indent) = sprint(print, a, indent)
 

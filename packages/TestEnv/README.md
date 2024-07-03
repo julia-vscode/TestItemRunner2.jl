@@ -5,12 +5,31 @@
 
 
 This is a 1-function package: `TestEnv.activate`.
-It lets you activate the test enviroment from a given package.
-Just like `Pkg.activate` lets you activate it's main enviroment.
+It lets you activate the test environment from a given package.
+
+### Why is this useful?
+
+This lets you run code in the test enviroment, interactively; giving you access to all your test-only dependencies.
+When you run `]test` in the REPL, a new Julia process is started which activates a temporary environment containing the tested package together with all its test-only dependencies.
+These can be either defined in the `[extras]` section in the package's `Project.toml` or in a separate `test/Project.toml`.
+The special temporary environment is different than the plain package environment (which doesn't contain the extra test dependencies) or the `test/Project.toml` environment (which doesn't contain the package itself, and may not exist).
+Once the tests finish, the extra Julia process is closed and the temporary environment is deleted.
+You are not able to manually run any other code in it, which would be useful for test writing and debugging.
+Julia does not offer an official mechanism to activate such an environment outside of `]test`.
+That's what `TestEnv.activate()` is for.
+
+## Note on installation:
+Like other developer focused tools, TestEnv.jl should not be added as a dependency of the package you are developing, but rather added to your global enviroment, so it is always available.
+The easiest way to install it to the global enviroment is to start julia (without passing the `--project` argument), and then run `] add TestEnv`.
 
 
-Consider for example **ChainRules.jl** has as a test-only dependency of **ChainRulesTestUtils.jl**,
-not a main dependency
+## Example
+
+Consider **ChainRules.jl** which has a test-only dependency of **ChainRulesTestUtils.jl**,
+not a main dependency.
+
+(Note that you can install `TestEnv` in your global environment as it has no dependencies other than `Pkg`.
+This way you can load it from anywhere, instead of having to add it to package environments.)
 
 ```julia
 pkg> activate ~/.julia/dev/ChainRules
@@ -34,43 +53,6 @@ TestEnv.activate("Example") do
     retest()
 end
 ```
-
-## Where is the code?
-The astute reader has probably notice that the default branch of this git repo is basically empty.
-This is because we keep all the code in other branches.
-One per minor release: `release-1.0`, `release-1.1` etc.
-We do this because TestEnv.jl accesses a whole ton of interals of [Pkg](https://github.com/JuliaLang/Pkg.jl).
-These internals change basically every single release.
-Maintaining compatibility in a single branch for multiple julia versions leads to code that is a nightmare.
-As such, we instead maintain 1 branch per julia minor version.
-And we tag releases off that branch with major and minor versions matching the julia version supported, but with patch versions allowed to change freely.
-
- - [release-1.0](https://github.com/JuliaTesting/TestEnv.jl/tree/release-1.0) contains the code to support julia v1.0.x
- - [release-1.1](https://github.com/JuliaTesting/TestEnv.jl/tree/release-1.1) contains the code to support julia v1.1.x
- - [release-1.2](https://github.com/JuliaTesting/TestEnv.jl/tree/release-1.2) contains the code to support julia v1.2.x
- - [release-1.3](https://github.com/JuliaTesting/TestEnv.jl/tree/release-1.3) contains the code to support julia v1.3.x
- - [release-1.4](https://github.com/JuliaTesting/TestEnv.jl/tree/release-1.4) contains the code to support julia v1.4.x, v1.5.x, and v1.6.x
-    - This was a rare goldern ages where the internals of Pkg did not change for almost a year.
- - [release-1.7](https://github.com/JuliaTesting/TestEnv.jl/tree/release-1.7) contains the code to support julia v1.7.x
- - [release-1.8](https://github.com/JuliaTesting/TestEnv.jl/tree/release-1.8) contains the code to support julia v1.8.x
-
-
-**Do not make PRs against this COVER branch.**
-Except to update this README.
-Instead you probably want to PR a branch for some current version of Julia.
-
-This is a bit weird for semver.
-New features *can* be added in patch release, but they must be ported to all later branches, and patch releases must be made there also.
-For the this reason: we *only* support the latest patch release of any branch.
-Older ones may be yanked if they start causing issues for people.
-
-
-## What should I put in my Project.toml `[compat]` section
-If using this as a dependency of a package that supports many versions of julia you may wonder what to put in your Project.toml's [compat] section.
-Do not fear, the package manager has your back.
-If you put in your `[compat]` for `TestEnv=`: `1` or equivalently `1.0` or `1.0` or `1.0.0` or `^1`, or `^1.0` or `^1.0` or `^1.0.0`,
-then the package manager is free to choose any compatible version `v` with `1.0.0 <= v < 2.0.0`.
-It will thus chose the corret minor version of TestEnv that is compatible with the loaded version of Julia.
 
 ### See also:
  - [Discourse Release Announcement](https://discourse.julialang.org/t/ann-testenv-jl-activate-your-test-enviroment-so-you-can-use-your-test-dependencies/65739)

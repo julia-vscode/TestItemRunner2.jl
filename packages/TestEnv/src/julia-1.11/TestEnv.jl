@@ -6,7 +6,7 @@ using Pkg.Operations: manifest_info, manifest_resolve!, project_deps_resolve!
 using Pkg.Operations: project_rel_path, project_resolve!
 using Pkg.Operations: sandbox, source_path, sandbox_preserve, abspath!
 using Pkg.Operations: gen_target_project, isfixed
-using Pkg.Operations: update_package_test!
+
 
 include("common.jl")
 include("activate_do.jl")

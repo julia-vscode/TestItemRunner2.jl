@@ -9,22 +9,6 @@ function lookup_var(frame, slot::SlotNumber)
     throw(UndefVarError(frame.framecode.src.slotnames[slot.id]))
 end
 
-function lookup_expr(frame, e::Expr)
-    head = e.head
-    head === :the_exception && return frame.framedata.last_exception[]
-    if head === :static_parameter
-        arg = e.args[1]::Int
-        if isassigned(frame.framedata.sparams, arg)
-            return frame.framedata.sparams[arg]
-        else
-            syms = sparam_syms(frame.framecode.scope::Method)
-            throw(UndefVarError(syms[arg]))
-        end
-    end
-    head === :boundscheck && length(e.args) == 0 && return true
-    error("invalid lookup expr ", e)
-end
-
 """
     rhs = @lookup(frame, node)
     rhs = @lookup(mod, frame, node)
@@ -67,6 +51,32 @@ macro lookup(args...)
     end
 end
 
+function lookup_expr(frame, e::Expr)
+    head = e.head
+    head === :the_exception && return frame.framedata.last_exception[]
+    if head === :static_parameter
+        arg = e.args[1]::Int
+        if isassigned(frame.framedata.sparams, arg)
+            return frame.framedata.sparams[arg]
+        else
+            syms = sparam_syms(frame.framecode.scope::Method)
+            throw(UndefVarError(syms[arg]))
+        end
+    end
+    head === :boundscheck && length(e.args) == 0 && return true
+    if head === :call
+        f = @lookup frame e.args[1]
+        if (@static VERSION < v"1.11.0-DEV.1180" && true) && f === Core.svec
+            # work around for a linearization bug in Julia (https://github.com/JuliaLang/julia/pull/52497)
+            return f(Any[@lookup(frame, e.args[i]) for i in 2:length(e.args)]...)
+        elseif f === Core.tuple
+            # handling for ccall literal syntax
+            return f(Any[@lookup(frame, e.args[i]) for i in 2:length(e.args)]...)
+        end
+    end
+    error("invalid lookup expr ", e)
+end
+
 # This is used only for new struct/abstract/primitive nodes.
 # The most important issue is that in these expressions, :call Exprs can be nested,
 # and hence our re-use of the `callargs` field of Frame would introduce
@@ -91,18 +101,26 @@ function lookup_or_eval(@nospecialize(recurse), frame, @nospecialize(node))
         if ex.head === :call
             f = ex.args[1]
             if f === Core.svec
-                return Core.svec(ex.args[2:end]...)
+                popfirst!(ex.args)
+                return Core.svec(ex.args...)
             elseif f === Core.apply_type
-                return Core.apply_type(ex.args[2:end]...)
-            elseif f === Core.typeof
-                return Core.typeof(ex.args[2])
-            elseif f === Base.getproperty
+                popfirst!(ex.args)
+                return Core.apply_type(ex.args...)
+            elseif f === typeof && length(ex.args) == 2
+                return typeof(ex.args[2])
+            elseif f === typeassert && length(ex.args) == 3
+                return typeassert(ex.args[2], ex.args[3])
+            elseif f === Base.getproperty && length(ex.args) == 3
                 return Base.getproperty(ex.args[2], ex.args[3])
+            elseif f === Core.Compiler.Val && length(ex.args) == 2
+                return Core.Compiler.Val(ex.args[2])
+            elseif f === Val && length(ex.args) == 2
+                return Val(ex.args[2])
             else
-                error("unknown call f ", f)
+                Base.invokelatest(error, "unknown call f introduced by ccall lowering ", f)
             end
         else
-            error("unknown expr ", ex)
+            return lookup_expr(frame, ex)
         end
     elseif isa(node, Int) || isa(node, Number)   # Number is slow, requires subtyping
         return node
@@ -129,7 +147,7 @@ function resolvefc(frame, @nospecialize(expr))
         (isa(a, QuoteNode) && a.value === Core.tuple) || error("unexpected ccall to ", expr)
         return Expr(:call, GlobalRef(Core, :tuple), (expr::Expr).args[2:end]...)
     end
-    error("unexpected ccall to ", expr)
+    Base.invokelatest(error, "unexpected ccall to ", expr)
 end
 
 function collect_args(@nospecialize(recurse), frame::Frame, call_expr::Expr; isfc::Bool=false)
@@ -204,6 +222,21 @@ function bypass_builtins(@nospecialize(recurse), frame, call_expr, pc)
     return nothing
 end
 
+function native_call(fargs::Vector{Any}, frame::Frame)
+    f = popfirst!(fargs) # now it's really just `args`
+    if (@static isdefined(Core.IR, :EnterNode) && true)
+        newscope = Core.current_scope()
+        if newscope !== nothing || !isempty(frame.framedata.current_scopes)
+            for scope in frame.framedata.current_scopes
+                newscope = Scope(newscope, scope.values...)
+            end
+            ex = Expr(:tryfinally, :($f($fargs...)), nothing, newscope)
+            return Core.eval(moduleof(frame), ex)
+        end
+    end
+    return Base.invokelatest(f, fargs...)
+end
+
 function evaluate_call_compiled!(::Compiled, frame::Frame, call_expr::Expr; enter_generated::Bool=false)
     # @assert !enter_generated
     pc = frame.pc
@@ -212,9 +245,7 @@ function evaluate_call_compiled!(::Compiled, frame::Frame, call_expr::Expr; ente
     ret = maybe_evaluate_builtin(frame, call_expr, false)
     isa(ret, Some{Any}) && return ret.value
     fargs = collect_args(Compiled(), frame, call_expr)
-    f = fargs[1]
-    popfirst!(fargs)  # now it's really just `args`
-    return f(fargs...)
+    return native_call(fargs, frame)
 end
 
 function evaluate_call_recurse!(@nospecialize(recurse), frame::Frame, call_expr::Expr; enter_generated::Bool=false)
@@ -245,8 +276,7 @@ function evaluate_call_recurse!(@nospecialize(recurse), frame::Frame, call_expr:
         framecode, lenv = get_call_framecode(fargs, frame.framecode, frame.pc; enter_generated=enter_generated)
         if lenv === nothing
             if isa(framecode, Compiled)
-                f = popfirst!(fargs)  # now it's really just `args`
-                return Base.invokelatest(f, fargs...)
+                return native_call(fargs, frame)
             end
             return framecode  # this was a Builtin
         end
@@ -283,24 +313,23 @@ evaluate_call!(frame::Frame, call_expr::Expr; kwargs...) = evaluate_call!(finish
 # The following come up only when evaluating toplevel code
 function evaluate_methoddef(frame, node)
     f = node.args[1]
-    if isa(f, Symbol)
-        mod = moduleof(frame)
-        if Base.isbindingresolved(mod, f) && isdefined(mod, f)  # `isdefined` accesses the binding, making it impossible to create a new one
-            f = getfield(mod, f)
+    if f isa Symbol || f isa GlobalRef
+        mod = f isa Symbol ? moduleof(frame) : f.mod
+        name = f isa Symbol ? f : f.name
+        if Base.isbindingresolved(mod, name) && isdefined(mod, name)  # `isdefined` accesses the binding, making it impossible to create a new one
+            f = getfield(mod, name)
         else
-            f = Core.eval(moduleof(frame), Expr(:function, f))  # create a new function
+            f = Core.eval(mod, Expr(:function, name))  # create a new function
         end
-    elseif isa(f, GlobalRef)
-        f = getfield(f.mod, f.name)
     end
     length(node.args) == 1 && return f
     sig = @lookup(frame, node.args[2])::SimpleVector
-    body = @lookup(frame, node.args[3])
+    body = @lookup(frame, node.args[3])::Union{CodeInfo, Expr}
     # branching on https://github.com/JuliaLang/julia/pull/41137
     @static if isdefined(Core.Compiler, :OverlayMethodTable)
-        ccall(:jl_method_def, Cvoid, (Any, Ptr{Cvoid}, Any, Any), sig, C_NULL, body, moduleof(frame))
+        ccall(:jl_method_def, Cvoid, (Any, Ptr{Cvoid}, Any, Any), sig, C_NULL, body, moduleof(frame)::Module)
     else
-        ccall(:jl_method_def, Cvoid, (Any, Any, Any), sig, body, moduleof(frame))
+        ccall(:jl_method_def, Cvoid, (Any, Any, Any), sig, body, moduleof(frame)::Module)
     end
     return f
 end
@@ -318,8 +347,8 @@ function structname(frame, node)
 end
 
 function set_structtype_const(mod::Module, name::Symbol)
-    dt = Base.unwrap_unionall(getfield(mod, name))
-    ccall(:jl_set_const, Cvoid, (Any, Any, Any), mod, dt.name.name, dt.name.wrapper)
+    dt = Base.unwrap_unionall(getfield(mod, name))::DataType
+    ccall(:jl_set_const, Cvoid, (Any, Any, Any), mod, dt.name.name::Symbol, dt.name.wrapper)
 end
 
 function inplace_lookup!(ex, i, frame)
@@ -342,17 +371,14 @@ function do_assignment!(frame, @nospecialize(lhs), @nospecialize(rhs))
         counter = (frame.assignment_counter += 1)
         data.locals[lhs.id] = Some{Any}(rhs)
         data.last_reference[lhs.id] = counter
-    elseif isa(lhs, GlobalRef)
+    elseif isa(lhs, Symbol) || isa(lhs, GlobalRef)
+        mod = lhs isa Symbol ? moduleof(frame) : lhs.mod
+        name = lhs isa Symbol ? lhs : lhs.name
+        Core.eval(mod, Expr(:global, name))
         @static if @isdefined setglobal!
-            setglobal!(lhs.mod, lhs.name, rhs)
+            setglobal!(mod, name, rhs)
         else
-            ccall(:jl_set_global, Cvoid, (Any, Any, Any), lhs.mod, lhs.name, rhs)
-        end
-    elseif isa(lhs, Symbol)
-        @static if @isdefined setglobal!
-            setglobal!(moduleof(code), lhs, rhs)
-        else
-            ccall(:jl_set_global, Cvoid, (Any, Any, Any), moduleof(code), lhs, rhs)
+            ccall(:jl_set_global, Cvoid, (Any, Any, Any), mod, name, rhs)
         end
     end
 end
@@ -370,7 +396,6 @@ function maybe_assign!(frame, @nospecialize(stmt), @nospecialize(val))
 end
 maybe_assign!(frame, @nospecialize(val)) = maybe_assign!(frame, pc_expr(frame), val)
 
-
 function eval_rhs(@nospecialize(recurse), frame, node::Expr)
     head = node.head
     if head === :new
@@ -378,12 +403,14 @@ function eval_rhs(@nospecialize(recurse), frame, node::Expr)
         args = let mod=mod
             Any[@lookup(mod, frame, arg) for arg in node.args]
         end
-        T = popfirst!(args)
+        T = popfirst!(args)::DataType
         rhs = ccall(:jl_new_structv, Any, (Any, Ptr{Any}, UInt32), T, args, length(args))
         return rhs
     elseif head === :splatnew  # Julia 1.2+
         mod = moduleof(frame)
-        rhs = ccall(:jl_new_structt, Any, (Any, Any), @lookup(mod, frame, node.args[1]), @lookup(mod, frame, node.args[2]))
+        T = @lookup(mod, frame, node.args[1])::DataType
+        args = @lookup(mod, frame, node.args[2])::Tuple
+        rhs = ccall(:jl_new_structt, Any, (Any, Any), T, args)
         return rhs
     elseif head === :isdefined
         return check_isdefined(frame, node.args[1])
@@ -396,12 +423,11 @@ function eval_rhs(@nospecialize(recurse), frame, node::Expr)
     elseif head === :copyast
         val = (node.args[1]::QuoteNode).value
         return isa(val, Expr) ? copy(val) : val
-    elseif head === :enter
-        return length(frame.framedata.exception_frames)
     elseif head === :boundscheck
         return true
     elseif head === :meta || head === :inbounds || head === :loopinfo ||
-           head === :gc_preserve_begin || head === :gc_preserve_end
+           head === :gc_preserve_begin || head === :gc_preserve_end ||
+           head === :aliasscope || head === :popaliasscope
         return nothing
     elseif head === :method && length(node.args) == 1
         return evaluate_methoddef(frame, node)
@@ -430,14 +456,25 @@ function coverage_visit_line!(frame::Frame)
     pc, code = frame.pc, frame.framecode
     code.report_coverage || return
     src = code.src
+    @static if VERSION ≥ v"1.12.0-DEV.173"
+    lineinfo = linetable(src, pc)
+    file, line = lineinfo.file, lineinfo.line
+    if line != frame.last_codeloc
+        file isa Symbol || (file = Symbol(file)::Symbol)
+        @ccall jl_coverage_visit_line(file::Cstring, sizeof(file)::Csize_t, line::Cint)::Cvoid
+        frame.last_codeloc = line
+    end
+    else # VERSION < v"1.12.0-DEV.173"
     codeloc = src.codelocs[pc]
-    if codeloc != frame.last_codeloc
+    if codeloc != frame.last_codeloc && codeloc != 0
         linetable = src.linetable::Vector{Any}
         lineinfo = linetable[codeloc]::Core.LineInfoNode
-        file, line = String(lineinfo.file), lineinfo.line
-        ccall(:jl_coverage_visit_line, Cvoid, (Cstring, Csize_t, Cint), file, sizeof(file), line)
+        file, line = lineinfo.file, lineinfo.line
+        file isa Symbol || (file = Symbol(file)::Symbol)
+        @ccall jl_coverage_visit_line(file::Cstring, sizeof(file)::Csize_t, line::Cint)::Cvoid
         frame.last_codeloc = codeloc
     end
+    end # @static if
 end
 
 # For "profiling" where JuliaInterpreter spends its time. See the commented-out block
@@ -470,26 +507,30 @@ function step_expr!(@nospecialize(recurse), frame, @nospecialize(node), istoplev
                 end
                 isa(rhs, BreakpointRef) && return rhs
                 do_assignment!(frame, lhs, rhs)
-            elseif node.head === :gotoifnot
-                arg = @lookup(frame, node.args[1])
-                if !isa(arg, Bool)
-                    throw(TypeError(nameof(frame), "if", Bool, arg))
-                end
-                if !arg
-                    return (frame.pc = node.args[2]::Int)
-                end
             elseif node.head === :enter
                 rhs = node.args[1]::Int
                 push!(data.exception_frames, rhs)
             elseif node.head === :leave
-                for _ = 1:node.args[1]::Int
-                    pop!(data.exception_frames)
+                if length(node.args) == 1 && isa(node.args[1], Int)
+                    arg = node.args[1]::Int
+                    for _ = 1:arg
+                        pop!(data.exception_frames)
+                    end
+                else
+                    for i = 1:length(node.args)
+                        targ = node.args[i]
+                        targ === nothing && continue
+                        enterstmt = frame.framecode.src.code[(targ::SSAValue).id]
+                        enterstmt === nothing && continue
+                        pop!(data.exception_frames)
+                        if isdefined(enterstmt, :scope)
+                            pop!(data.current_scopes)
+                        end
+                    end
                 end
             elseif node.head === :pop_exception
-                n = lookup_var(frame, node.args[1]::SSAValue)::Int
-                deleteat!(data.exception_frames, n+1:length(data.exception_frames))
-            elseif node.head === :return
-                return nothing
+                # TODO: This needs to handle the exception stack properly
+                # (https://github.com/JuliaDebug/JuliaInterpreter.jl/issues/591)
             elseif istoplevel
                 if node.head === :method && length(node.args) > 1
                     evaluate_methoddef(frame, node)
@@ -547,8 +588,7 @@ function step_expr!(@nospecialize(recurse), frame, @nospecialize(node), istoplev
             end
         elseif isa(node, GotoNode)
             return (frame.pc = node.label)
-        elseif is_GotoIfNot(node)
-            node = node::Core.GotoIfNot
+        elseif isa(node, GotoIfNot)
             arg = @lookup(frame, node.cond)
             if !isa(arg, Bool)
                 throw(TypeError(nameof(frame), "if", Bool, arg))
@@ -556,13 +596,19 @@ function step_expr!(@nospecialize(recurse), frame, @nospecialize(node), istoplev
             if !arg
                 return (frame.pc = node.dest)
             end
-        elseif is_ReturnNode(node)
+        elseif isa(node, ReturnNode)
             return nothing
         elseif isa(node, NewvarNode)
             # FIXME: undefine the slot?
         elseif istoplevel && isa(node, LineNumberNode)
         elseif istoplevel && isa(node, Symbol)
             rhs = getfield(moduleof(frame), node)
+        elseif @static (isdefined(Core.IR, :EnterNode) && true) && isa(node, Core.IR.EnterNode)
+            rhs = node.catch_dest
+            push!(data.exception_frames, rhs)
+            if isdefined(node, :scope)
+                push!(data.current_scopes, @lookup(frame, node.scope))
+            end
         else
             rhs = @lookup(frame, node)
         end
@@ -633,14 +679,12 @@ function handle_err(@nospecialize(recurse), frame, err)
         rethrow(err)
     end
     data.last_exception[] = err
-    return (frame.pc = data.exception_frames[end])
+    pc = @static VERSION >= v"1.11-" ? pop!(data.exception_frames) : data.exception_frames[end] # implicit :leave after https://github.com/JuliaLang/julia/pull/52245
+    frame.pc = pc
+    return pc
 end
 
-if isdefined(Core, :ReturnNode)
-    lookup_return(frame, node::Core.ReturnNode) = @lookup(frame, node.val)
-else
-    lookup_return(frame, node::Expr) = @lookup(frame, node.args[1])
-end
+lookup_return(frame, node::ReturnNode) = @lookup(frame, node.val)
 
 """
     ret = get_return(frame)
@@ -651,7 +695,7 @@ e.g., [`JuliaInterpreter.finish!`](@ref)).
 """
 function get_return(frame)
     node = pc_expr(frame)
-    is_return(node) || error("expected return statement, got ", node)
+    is_return(node) || Base.invokelatest(error, "expected return statement, got ", node)
     return lookup_return(frame, node)
 end
 get_return(t::Tuple{Module,Expr,Frame}) = get_return(t[end])

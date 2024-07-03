@@ -1,6 +1,6 @@
 using Base.Meta
 import Base: +, -, convert, isless, get_world_counter
-using Core: CodeInfo, SimpleVector, LineInfoNode, GotoNode, Slot,
+using Core: CodeInfo, SimpleVector, LineInfoNode, GotoNode, GotoIfNot, ReturnNode,
             GeneratedFunctionStub, MethodInstance, NewvarNode, TypeName
 
 using UUIDs
@@ -41,6 +41,12 @@ if !isdefined(Base, Symbol("@something"))
     macro something(x...)
         :(something($(map(esc, x)...)))
     end
+end
+
+if isdefined(Base, :ScopedValues)
+    using Base: ScopedValues.Scope
+else
+    const Scope = Any
 end
 
 include("types.jl")
@@ -150,7 +156,7 @@ function __init__()
     #     compiled_calls[(qsym, RT, Core.svec(AT...), Core.Compiler)] = f
     #     precompile(f, AT)
     # end
-    
+
     @static if isdefined(Base, :have_fma)
         FMA_FLOAT64[] = _have_fma_compiled(Float64)
         FMA_FLOAT32[] = _have_fma_compiled(Float32)

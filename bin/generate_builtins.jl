@@ -2,15 +2,19 @@
 # Should be run on the latest Julia nightly
 using InteractiveUtils
 
-# All bultins added since 1.6. Needs to be updated whenever a new builtin is added
-const RECENTLY_ADDED = Core.Builtin[
-    Core._call_in_world_total, Core.donotdelete,
-    Core.get_binding_type, Core.set_binding_type!,
-    Core.getglobal, Core.setglobal!,
-    Core.modifyfield!, Core.replacefield!, Core.swapfield!,
-    Core.finalizer, Core._compute_sparams, Core._svec_ref,
-    Core.compilerbarrier
+# All builtins present in 1.6
+const ALWAYS_PRESENT = Core.Builtin[
+    (<:), (===), Core._abstracttype, Core._apply_iterate, Core._apply_pure,
+    Core._call_in_world, Core._call_latest, Core._equiv_typedef, Core._expr,
+    Core._primitivetype, Core._setsuper!, Core._structtype, Core._typebody!,
+    Core._typevar, Core.apply_type, Core.ifelse, Core.sizeof, Core.svec,
+    applicable, fieldtype, getfield, invoke, isa, isdefined, nfields,
+    setfield!, throw, tuple, typeassert, typeof
 ]
+# Builtins present from 1.6, not builtins (potentially still normal functions) anymore
+const RECENTLY_REMOVED = GlobalRef.(Ref(Core), [
+    :arrayref, :arrayset, :arrayset, :const_arrayref, :memoryref,
+])
 const kwinvoke = Core.kwfunc(Core.invoke)
 
 function scopedname(f)
@@ -33,11 +37,10 @@ function nargs(f, table, id)
         minarg = 0
         maxarg = typemax(Int)
     end
-    # Specialize arrayref and arrayset for small numbers of arguments
-    if f == Core.arrayref
+    # Specialize ~arrayref and arrayset~ memoryrefnew for small numbers of arguments
+    # TODO: how about other memory intrinsics?
+    if (@static isdefined(Core, :memoryrefnew) ? f == Core.memoryrefnew : f == Core.memoryref)
         maxarg = 5
-    elseif f == Core.arrayset
-        maxarg = 6
     end
     return minarg, maxarg
 end
@@ -183,13 +186,13 @@ function maybe_evaluate_builtin(frame, call_expr, expand::Bool)
             print(io,
 """
     $head f === $fstr
-            if !expand
-                argswrapped = getargs(args, frame)
-                return Some{Any}($fstr(argswrapped...))
-            end
-            # This uses the original arguments to avoid looking them up twice
-            # See #442
-            return Expr(:call, invoke, args[2:end]...)
+        if !expand
+            argswrapped = getargs(args, frame)
+            return Some{Any}($fstr(argswrapped...))
+        end
+        # This uses the original arguments to avoid looking them up twice
+        # See #442
+        return Expr(:call, invoke, args[2:end]...)
 """)
             continue
         elseif f === Core._call_latest
@@ -207,11 +210,27 @@ function maybe_evaluate_builtin(frame, call_expr, expand::Bool)
         end
         return maybe_recurse_expanded_builtin(frame, new_expr)
 """)
+            continue
+        elseif f === Core.current_scope
+            print(io,
+"""
+    elseif @static isdefined(Core, :current_scope) && f === Core.current_scope
+        if nargs == 0
+            currscope = Core.current_scope()
+            for scope in frame.framedata.current_scopes
+                currscope = Scope(currscope, scope.values...)
+            end
+            return Some{Any}(currscope)
+        else
+            return Some{Any}(Core.current_scope(getargs(args, frame)...))
+        end
+""")
+            continue
         end
 
         id = findfirst(isequal(f), Core.Compiler.T_FFUNC_KEY)
         fcall = generate_fcall(f, Core.Compiler.T_FFUNC_VAL, id)
-        if f in RECENTLY_ADDED
+        if !(f in ALWAYS_PRESENT)
             print(io,
 """
     $head @static isdefined($(ft.name.module), $(repr(nameof(f)))) && f === $fname
@@ -246,6 +265,25 @@ function maybe_evaluate_builtin(frame, call_expr, expand::Bool)
             return Some{Any}(Core.eval(moduleof(frame), call_expr))
         end
 """)
+    # recently removed builtins
+    for (; mod, name) in RECENTLY_REMOVED
+        minarg = 1
+        if name in (:arrayref, :const_arrayref, :memoryref)
+            maxarg = 5
+        elseif name === :arrayset
+            maxarg = 6
+        elseif name === :arraysize
+            maxarg = 2
+        end
+        _scopedname = "$mod.$name"
+        fcall = generate_fcall_nargs(_scopedname, minarg, maxarg)
+        rname = repr(name)
+        print(io,
+"""
+    elseif @static (isdefined($mod, $rname) && $_scopedname isa Core.Builtin) && f === $_scopedname
+        $fcall
+""")
+    end
     # Extract any intrinsics that support varargs
     fva = []
     minmin, maxmax = typemax(Int), 0

@@ -119,7 +119,7 @@ maybe_next_until!(@nospecialize(predicate), frame::Frame, istoplevel::Bool=false
     pc = next_call!(frame, istoplevel=false)
 
 Execute the current statement. Continue stepping through `frame` until the next
-`:return` or `:call` expression.
+`ReturnNode` or `:call` expression.
 """
 next_call!(@nospecialize(recurse), frame::Frame, istoplevel::Bool=false) =
     next_until!(frame -> is_call_or_return(pc_expr(frame)), recurse, frame, istoplevel)
@@ -129,8 +129,8 @@ next_call!(frame::Frame, istoplevel::Bool=false) = next_call!(finish_and_return!
     pc = maybe_next_call!(recurse, frame, istoplevel=false)
     pc = maybe_next_call!(frame, istoplevel=false)
 
-Return the current program counter of `frame` if it is a `:return` or `:call` expression.
-Otherwise, step through the statements of `frame` until the next `:return` or `:call` expression.
+Return the current program counter of `frame` if it is a `ReturnNode` or `:call` expression.
+Otherwise, step through the statements of `frame` until the next `ReturnNode` or `:call` expression.
 """
 maybe_next_call!(@nospecialize(recurse), frame::Frame, istoplevel::Bool=false) =
     maybe_next_until!(frame -> is_call_or_return(pc_expr(frame)), recurse, frame, istoplevel)
@@ -214,7 +214,8 @@ which execution should start.
 """
 function maybe_step_through_wrapper!(@nospecialize(recurse), frame::Frame)
     code = frame.framecode
-    stmts, scope = code.src.code, code.scope::Method
+    src = code.src
+    stmts, scope = src.code, code.scope::Method
     length(stmts) < 2 && return frame
     last = stmts[end-1]
     isexpr(last, :(=)) && (last = last.args[2])
@@ -225,13 +226,14 @@ function maybe_step_through_wrapper!(@nospecialize(recurse), frame::Frame)
         if unwrap1 isa DataType
             param1 = Base.unwrap_unionall(unwrap1.parameters[1])
             if param1 isa DataType
-                is_kw = endswith(String(param1.name.name), "#kw")
+                is_kw = isdefined(Core, :kwcall) ? param1.name.name === Symbol("#kwcall") :
+                                                   endswith(String(param1.name.name), "#kw")
             end
         end
     end
 
     has_selfarg = isexpr(last, :call) && any(@nospecialize(x) -> isa(x, SlotNumber) && x.id == 1, last.args) # isequal(SlotNumber(1)) vulnerable to invalidation
-    issplatcall, _callee = unpack_splatcall(last)
+    issplatcall, _callee = unpack_splatcall(last, src)
     if is_kw || has_selfarg || (issplatcall && is_bodyfunc(_callee))
         # If the last expr calls #self# or passes it to an implementation method,
         # this is a wrapper function that we might want to step through
@@ -253,6 +255,13 @@ function maybe_step_through_wrapper!(@nospecialize(recurse), frame::Frame)
 end
 maybe_step_through_wrapper!(frame::Frame) = maybe_step_through_wrapper!(finish_and_return!, frame)
 
+if isdefined(Core, :kwcall)
+    const kwhandler = Core.kwcall
+    const kwextrastep = 0
+else
+    const kwhandler = Core.kwfunc
+    const kwextrastep = 1
+end
 
 """
     frame = maybe_step_through_kwprep!(recurse, frame)
@@ -262,24 +271,29 @@ If `frame.pc` points to the beginning of preparatory work for calling a keyword-
 function, advance forward until the actual call.
 """
 function maybe_step_through_kwprep!(@nospecialize(recurse), frame::Frame, istoplevel::Bool=false)
+    # XXX This code just does pattern-matching based on the current state of the compiler
+    # internals, which means this is very fragile against any future changes to those
+    # internals. We really need a more general and robust solution, but achieving that
+    # would mean simplifying and unifying how "keyword function" is represented and
+    # implemented. For the time being, our best bet is to keep tweaking it as best as we can.
     pc, src = frame.pc, frame.framecode.src
     n = length(src.code)
     stmt = pc_expr(frame, pc)
     if isa(stmt, Tuple{Symbol,Vararg{Symbol}})
         # Check to see if we're creating a NamedTuple followed by kwfunc call
-        pccall = pc + 5
+        pccall = pc + 4 + kwextrastep
         if pccall <= n
             stmt1 = src.code[pc+1]
             # We deliberately check isexpr(stmt, :call) rather than is_call(stmt): if it's
             # assigned to a local, it's *not* kwarg preparation.
             if isexpr(stmt1, :call) && is_quotenode_egal(stmt1.args[1], Core.apply_type) && is_quoted_type(stmt1.args[2], :NamedTuple)
                 stmt4, stmt5 = src.code[pc+4], src.code[pc+5]
-                if isexpr(stmt4, :call) && is_quotenode_egal(stmt4.args[1], Core.kwfunc)
+                if isexpr(stmt4, :call) && is_quotenode_egal(stmt4.args[1], kwhandler)
                     while pc < pccall
                         pc = step_expr!(recurse, frame, istoplevel)
                     end
                     return frame
-                elseif isexpr(stmt5, :call) && is_quotenode_egal(stmt5.args[1], Core.kwfunc) && pccall+1 <= n
+                elseif isexpr(stmt5, :call) && is_quotenode_egal(stmt5.args[1], kwhandler) && pccall+1 <= n
                     # This happens when the call is scoped by a module
                     pccall += 1
                     while pc < pccall
@@ -300,7 +314,7 @@ function maybe_step_through_kwprep!(@nospecialize(recurse), frame::Frame, istopl
                     # No supplied kwargs
                     pcsplat = pc + 3
                     if pcsplat <= n
-                        issplatcall, callee = unpack_splatcall(src.code[pcsplat])
+                        issplatcall, callee = unpack_splatcall(src.code[pcsplat], src)
                         if issplatcall && is_bodyfunc(callee)
                             while pc < pcsplat
                                 pc = step_expr!(recurse, frame, istoplevel)
@@ -321,12 +335,12 @@ function maybe_step_through_kwprep!(@nospecialize(recurse), frame::Frame, istopl
                     end
                 elseif is_quotenode_egal(f, Base.merge) && ((pccall = pc + 7) <= n)
                     stmtk = src.code[pccall-1]
-                    if isexpr(stmtk, :call) && is_quotenode_egal(stmtk.args[1], Core.kwfunc)
+                    if isexpr(stmtk, :call) && is_quotenode_egal(stmtk.args[1], kwhandler)
                         for i = 1:4
                             pc = step_expr!(recurse, frame, istoplevel)
                         end
                         stmti = src.code[pc]
-                        if isexpr(stmti, :call) && is_quotenode_egal(stmti.args[1], Core.kwfunc)
+                        if isexpr(stmti, :call) && is_quotenode_egal(stmti.args[1], #= deliberately not kwhandler =# Core.kwfunc)
                             pc = step_expr!(recurse, frame, istoplevel)
                         end
                     end
@@ -378,7 +392,7 @@ maybe_reset_frame!(frame::Frame, @nospecialize(pc), rootistoplevel::Bool) =
 # Unwind the stack until an exc is eventually caught, thereby
 # returning the frame that caught the exception at the pc of the catch
 # or rethrow the error
-function unwind_exception(frame::Frame, exc)
+function unwind_exception(frame::Frame, @nospecialize(exc))
     while frame !== nothing
         if !isempty(frame.framedata.exception_frames)
             # Exception caught

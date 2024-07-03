@@ -1,35 +1,99 @@
+"""
+    JSONRPCError
+
+An object representing a JSON-RPC Error.
+
+Fields:
+ * code::Int
+ * msg::AbstractString
+ * data::Any
+
+See Section 5.1 of the JSON RPC 2.0 specification for more information.
+"""
 struct JSONRPCError <: Exception
     code::Int
     msg::AbstractString
     data::Any
 end
 
+"""
+    SERVER_ERROR_END
+
+The end of the range of server-reserved errors.
+
+These are JSON-RPC server errors that are free for the taking
+for JSON-RPC server implementations. Applications making use of
+this library should NOT define new errors in this range.
+"""
+const SERVER_ERROR_END = -32000
+
+"""
+    SERVER_ERROR_START
+
+The start of the range of server-reserved errors.
+
+These are JSON-RPC server errors that are free for the taking
+for JSON-RPC server implementations. Applications making use of
+this library should NOT define new errors in this range.
+"""
+const SERVER_ERROR_START = -32099
+
+"""
+    PARSE_ERROR
+
+Invalid JSON was received by the server.
+An error occurred on the server while parsing the JSON text.
+"""
+const PARSE_ERROR = -32700
+
+"""
+    INVALID_REQUEST
+
+The JSON sent is not a valid Request object.
+"""
+const INVALID_REQUEST = -32600
+
+"""
+    METHOD_NOT_FOUND
+
+The method does not exist / is not available.
+"""
+const METHOD_NOT_FOUND = -32601
+
+"""
+    INVALID_PARAMS
+
+Invalid method parameter(s).
+"""
+const INVALID_PARAMS = -32602
+
+"""
+    INTERNAL_ERROR
+
+Internal JSON-RPC error.
+"""
+const INTERNAL_ERROR = -32603
+
+"""
+   RPCErrorStrings
+
+A `Base.IdDict` containing the mapping of JSON-RPC error codes to a short, descriptive string.
+
+Use this to hook into `showerror(io::IO, ::JSONRPCError)` for display purposes. A default fallback to `"Unknown"` exists.
+"""
+const RPCErrorStrings = Base.IdDict(
+    PARSE_ERROR => "ParseError",
+    INVALID_REQUEST => "InvalidRequest",
+    METHOD_NOT_FOUND => "MethodNotFound",
+    INVALID_PARAMS => "InvalidParams",
+    INTERNAL_ERROR => "InternalError",
+    [ i => "ServerError" for i in SERVER_ERROR_START:SERVER_ERROR_END]...,
+    -32002 => "ServerNotInitialized",
+    -32001 => "UnknownErrorCode",
+)
+
 function Base.showerror(io::IO, ex::JSONRPCError)
-    error_code_as_string = if ex.code == -32700
-        "ParseError"
-    elseif ex.code == -32600
-        "InvalidRequest"
-    elseif ex.code == -32601
-        "MethodNotFound"
-    elseif ex.code == -32602
-        "InvalidParams"
-    elseif ex.code == -32603
-        "InternalError"
-    elseif ex.code == -32099
-        "serverErrorStart"
-    elseif ex.code == -32000
-        "serverErrorEnd"
-    elseif ex.code == -32002
-        "ServerNotInitialized"
-    elseif ex.code == -32001
-        "UnknownErrorCode"
-    elseif ex.code == -32800
-        "RequestCancelled"
-	elseif ex.code == -32801
-        "ContentModified"
-    else
-        "Unkonwn"
-    end
+    error_code_as_string = get(RPCErrorStrings, ex.code, "Unknown")
 
     print(io, error_code_as_string)
     print(io, ": ")
@@ -70,20 +134,28 @@ function write_transport_layer(stream, response)
 end
 
 function read_transport_layer(stream)
-    header_dict = Dict{String,String}()
-    line = chomp(readline(stream))
-    # Check whether the socket was closed
-    if line == ""
-        return nothing
-    end
-    while length(line) > 0
-        h_parts = split(line, ":")
-        header_dict[chomp(h_parts[1])] = chomp(h_parts[2])
+    try
+        header_dict = Dict{String,String}()
         line = chomp(readline(stream))
+        # Check whether the socket was closed
+        if line == ""
+            return nothing
+        end
+        while length(line) > 0
+            h_parts = split(line, ":")
+            header_dict[chomp(h_parts[1])] = chomp(h_parts[2])
+            line = chomp(readline(stream))
+        end
+        message_length = parse(Int, header_dict["Content-Length"])
+        message_str = String(read(stream, message_length))
+        return message_str
+    catch err
+        if err isa Base.IOError
+            return nothing
+        end
+
+        rethrow(err)
     end
-    message_length = parse(Int, header_dict["Content-Length"])
-    message_str = String(read(stream, message_length))
-    return message_str
 end
 
 Base.isopen(x::JSONRPCEndpoint) = x.status != :closed && isopen(x.pipe_in) && isopen(x.pipe_out)
@@ -114,37 +186,41 @@ function Base.run(x::JSONRPCEndpoint)
     end
 
     x.read_task = @async try
-        try
-            while true
-                message = read_transport_layer(x.pipe_in)
+        while true
+            message = read_transport_layer(x.pipe_in)
 
-                if message === nothing || x.status == :closed
-                    break
-                end
-
-                message_dict = JSON.parse(message)
-
-                if haskey(message_dict, "method")
-                    try
-                        put!(x.in_msg_queue, message_dict)
-                    catch err
-                        if err isa InvalidStateException
-                            break
-                        else
-                            rethrow(err)
-                        end
-                    end
-                else
-                    # This must be a response
-                    id_of_request = message_dict["id"]
-
-                    channel_for_response = x.outstanding_requests[id_of_request]
-                    put!(channel_for_response, message_dict)
-                end
+            if message === nothing || x.status == :closed
+                break
             end
-        finally
-            close(x.in_msg_queue)
+
+            message_dict = JSON.parse(message)
+
+            if haskey(message_dict, "method")
+                try
+                    put!(x.in_msg_queue, message_dict)
+                catch err
+                    if err isa InvalidStateException
+                        break
+                    else
+                        rethrow(err)
+                    end
+                end
+            else
+                # This must be a response
+                id_of_request = message_dict["id"]
+
+                channel_for_response = x.outstanding_requests[id_of_request]
+                put!(channel_for_response, message_dict)
+            end
         end
+        
+        close(x.in_msg_queue)
+
+        for i in values(x.outstanding_requests)
+            close(i)
+        end
+
+        x.status = :closed
     catch err
         bt = catch_backtrace()
         if x.err_handler !== nothing
@@ -239,6 +315,8 @@ function send_error_response(endpoint, original_request, code, message, data)
 end
 
 function Base.close(endpoint::JSONRPCEndpoint)
+    endpoint.status == :closed && return
+
     flush(endpoint)
 
     endpoint.status = :closed

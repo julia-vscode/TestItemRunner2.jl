@@ -11,10 +11,17 @@
             "problemMatcher": []
         },
         {
-            "label": "Pull latest version of CSTParser",
+            "label": "Pull latest version of CoverageTools",
             "type": "process",
             "command": "git",
-            "args": ["subtree", "pull", "--prefix", "packages/CSTParser", "https://github.com/julia-vscode/CSTParser.jl", "master", "--squash"],
+            "args": ["subtree", "pull", "--prefix", "packages/CoverageTools", "https://github.com/JuliaCI/CoverageTools.jl", "master", "--squash"],
+            "problemMatcher": []
+        },
+        {
+            "label": "Pull latest version of DebugAdapter",
+            "type": "process",
+            "command": "git",
+            "args": ["subtree", "pull", "--prefix", "packages/DebugAdapter", "https://github.com/julia-vscode/DebugAdapter.jl", "master", "--squash"],
             "problemMatcher": []
         },
         {
@@ -63,7 +70,7 @@
             "label": "Pull latest version of TestEnv",
             "type": "process",
             "command": "git",
-            "args": ["subtree", "pull", "--prefix", "packages/TestEnv", "https://github.com/davidanthoff/TestEnv.jl", "main", "--squash"],
+            "args": ["subtree", "pull", "--prefix", "packages/TestEnv", "https://github.com/JuliaTesting/TestEnv.jl", "main", "--squash"],
             "problemMatcher": []
         },
         {
@@ -71,13 +78,6 @@
             "type": "process",
             "command": "git",
             "args": ["subtree", "pull", "--prefix", "packages/TestItemServer", "https://github.com/julia-vscode/TestItemServer.jl", "main", "--squash"],
-            "problemMatcher": []
-        },
-        {
-            "label": "Pull latest version of Tokenize",
-            "type": "process",
-            "command": "git",
-            "args": ["subtree", "pull", "--prefix", "packages/Tokenize", "https://github.com/JuliaLang/Tokenize.jl", "master", "--squash"],
             "problemMatcher": []
         },
         {

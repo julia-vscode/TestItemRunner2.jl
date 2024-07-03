@@ -1,8 +1,4 @@
-const StoreType{T} = Union{Tuple{Vararg{T}}, AbstractVector{T}}
-
-@noinline function _throw_unequal_lengths(nk::Int, nv::Int)
-    throw(ArgumentError("Number of keys ($nk) differs from number of values ($nv)."))
-end
+const StoreType = Union{<:Tuple, <:Vector}
 
 """
     LittleDict(keys, vals)<:AbstractDict
@@ -32,18 +28,22 @@ as well as on how many hash collisions occur etc.
     copies to create the `LittleDict`, so `LittleDict(ks::Tuple, vs::Tuple)`
     is the fastest constructor of all.
 """
-struct LittleDict{K, V, KS<:StoreType{K}, VS<:StoreType{V}} <: AbstractDict{K, V}
+struct LittleDict{K,V,KS<:StoreType,VS<:StoreType} <: AbstractDict{K, V}
     keys::KS
     vals::VS
 
-    function LittleDict{K, V, KS, VS}(keys, vals) where {K, V, KS, VS}
-        nk = length(keys)
-        nv = length(vals)
-        nk == nv || _throw_unequal_lengths(Int(nk), Int(nv))
-        return new{K, V, KS, VS}(keys, vals)
+    function LittleDict{K,V,KS,VS}(keys,vals) where {K,V,KS,VS}
+        if length(keys) != length(vals)
+            throw(ArgumentError(
+                "Number of keys ($(length(keys))) differs from " *
+                "number of values ($(length(vals))"
+            ))
+        end
+        K<:eltype(KS) || ArgumentError("Invalid store type $KS, for key type $K")
+        V<:eltype(VS) || ArgumentError("Invalid store type $VS, for value type $K")
+
+        return new(keys,vals)
     end
-    LittleDict{K, V, <:Tuple, <:Tuple}() where {K, V} = new{K, V, Tuple{}, Tuple{}}((), ())
-    LittleDict{K, V, KS, VS}() where {K, V, KS, VS} = LittleDict{K, V, KS, VS}(KS(), VS())
 end
 
 function LittleDict{K,V}(ks::KS, vs::VS) where {K,V, KS<:StoreType,VS<:StoreType}
@@ -54,8 +54,10 @@ function LittleDict(ks::KS, vs::VS) where {KS<:StoreType,VS<:StoreType}
     return LittleDict{eltype(KS), eltype(VS)}(ks, vs)
 end
 
+
 # Other iterators should be copied to a Vector
 LittleDict(ks, vs) = LittleDict(collect(ks), collect(vs))
+
 
 function LittleDict{K,V}(itr) where {K,V}
     ks = K[]
@@ -108,8 +110,8 @@ end
 isordered(::Type{<:LittleDict}) = true
 
 # For now these are internal UnionAlls for dispatch purposes
-const UnfrozenLittleDict{K, V} = LittleDict{K, V, <:AbstractVector{K}, <:AbstractVector{V}}
-const FrozenLittleDict{K, V} = LittleDict{K, V, <:Tuple, <:Tuple}
+const UnfrozenLittleDict{K,V} = LittleDict{K,V, Vector{K}, Vector{V}}
+const FrozenLittleDict{K,V} = LittleDict{K,V, <:Tuple, <:Tuple}
 
 ##### Methods that all AbstractDicts should implement
 
@@ -155,13 +157,6 @@ function Base.iterate(dd::LittleDict, ii=1)
     return (dd.keys[ii] => dd.vals[ii], ii+1)
 end
 
-# lazy reverse iteration
-function Base.iterate(rdd::Iterators.Reverse{<:LittleDict}, ii=length(rdd.itr.keys))
-    dd = rdd.itr
-    ii < 1 && return nothing
-    return (dd.keys[ii] => dd.vals[ii], ii-1)
-end
-
 function merge(d1::LittleDict, others::AbstractDict...)
     return merge((x,y)->y, d1, others...)
 end
@@ -188,9 +183,8 @@ function merge(
     return dc
 end
 
-function Base.empty(dd::LittleDict{K,V}) where {K,V}
-    LittleDict{K, V}(empty(getfield(dd, :keys)), empty(getfield(dd, :vals)))
-end
+
+Base.empty(dd::LittleDict{K,V}) where {K,V} = LittleDict{K,V}()
 
 ######## Methods that all mutable AbstractDict's should implement
 
@@ -211,6 +205,7 @@ function add_new!(dd::UnfrozenLittleDict{K, V}, key, value) where {K, V}
 
     return dd
 end
+
 
 function Base.setindex!(dd::LittleDict{K,V, <:Any, <:Vector}, value, key) where {K,V}
     # Note we only care if the Value store is mutable (<:Vector)

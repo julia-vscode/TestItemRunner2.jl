@@ -29,7 +29,6 @@ Revise.revision_queue
 Revise.NOPACKAGE
 Revise.queue_errors
 Revise.included_files
-Revise.watched_manifests
 ```
 
 The following are specific to user callbacks (see [`Revise.add_callback`](@ref)) and

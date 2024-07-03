@@ -98,34 +98,46 @@ end
 
 const preprinter_sentinel = isdefined(Base.IRShow, :statementidx_lineinfo_printer) ? 0 : typemin(Int32)
 
-function print_with_code(preprint, postprint, io::IO, src::CodeInfo)
-    src = copy(src)
-    JuliaInterpreter.replace_coretypes!(src; rev=true)
-    if isdefined(JuliaInterpreter, :reverse_lookup_globalref!)
-        JuliaInterpreter.reverse_lookup_globalref!(src.code)
+if isdefined(Base.IRShow, :show_ir_stmt)
+    function print_with_code(preprint, postprint, io::IO, src::CodeInfo)
+        src = copy(src)
+        JuliaInterpreter.replace_coretypes!(src; rev=true)
+        if isdefined(JuliaInterpreter, :reverse_lookup_globalref!)
+            JuliaInterpreter.reverse_lookup_globalref!(src.code)
+        end
+        io = IOContext(io, :displaysize=>displaysize(io))
+        used = BitSet()
+        cfg = Core.Compiler.compute_basic_blocks(src.code)
+        for stmt in src.code
+            Core.Compiler.scan_ssa_use!(push!, used, stmt)
+        end
+        line_info_preprinter = Base.IRShow.lineinfo_disabled
+        line_info_postprinter = Base.IRShow.default_expr_type_printer
+        preprint(io)
+        bb_idx_prev = bb_idx = 1
+        for idx = 1:length(src.code)
+            preprint(io, idx)
+            bb_idx = Base.IRShow.show_ir_stmt(io, src, idx, line_info_preprinter, line_info_postprinter, used, cfg, bb_idx)
+            postprint(io, idx, bb_idx != bb_idx_prev)
+            bb_idx_prev = bb_idx
+        end
+        max_bb_idx_size = ndigits(length(cfg.blocks))
+        line_info_preprinter(io, " "^(max_bb_idx_size + 2), preprinter_sentinel)
+        postprint(io)
+        return nothing
     end
-    io = IOContext(io,
-        :displaysize=>displaysize(io),
-        :SOURCE_SLOTNAMES => Base.sourceinfo_slotnames(src))
-    used = BitSet()
-    cfg = Core.Compiler.compute_basic_blocks(src.code)
-    for stmt in src.code
-        Core.Compiler.scan_ssa_use!(push!, used, stmt)
+else
+    function print_with_code(preprint, postprint, io::IO, src::CodeInfo)
+        println(io, "No IR statement printer available on this version of Julia, just aligning statements.")
+        preprint(io)
+        for idx = 1:length(src.code)
+            preprint(io, idx)
+            print(io, src.code[idx])
+            println(io)
+            postprint(io, idx, false)
+        end
+        postprint(io)
     end
-    line_info_preprinter = Base.IRShow.lineinfo_disabled
-    line_info_postprinter = Base.IRShow.default_expr_type_printer
-    preprint(io)
-    bb_idx_prev = bb_idx = 1
-    for idx = 1:length(src.code)
-        preprint(io, idx)
-        bb_idx = Base.IRShow.show_ir_stmt(io, src, idx, line_info_preprinter, line_info_postprinter, used, cfg, bb_idx)
-        postprint(io, idx, bb_idx != bb_idx_prev)
-        bb_idx_prev = bb_idx
-    end
-    max_bb_idx_size = ndigits(length(cfg.blocks))
-    line_info_preprinter(io, " "^(max_bb_idx_size + 2), preprinter_sentinel)
-    postprint(io)
-    return nothing
 end
 
 """
@@ -133,9 +145,8 @@ end
 
 Interweave display of code and links.
 
-!!! compat "Julia 1.6"
+!!! compat Julia 1.6
     This function produces dummy output if suitable support is missing in your version of Julia.
-
 """
 function print_with_code(io::IO, src::CodeInfo, cl::CodeLinks)
     function preprint(io::IO)
@@ -295,10 +306,10 @@ function add_links!(target::Pair{Union{SSAValue,SlotNumber,NamedVar},Links}, @no
         for i in arng
             add_links!(target, stmt.args[i], cl)
         end
-    elseif stmt isa Core.GotoIfNot
-        add_links!(target, stmt.cond, cl)
-    elseif stmt isa Core.ReturnNode
-        add_links!(target, stmt.val, cl)
+    elseif is_GotoIfNot(stmt)
+        add_links!(target, (stmt::Core.GotoIfNot).cond, cl)
+    elseif is_ReturnNode(stmt)
+        add_links!(target, (stmt::Core.ReturnNode).val, cl)
     end
     return nothing
 end
@@ -386,6 +397,7 @@ Analyze `src` and determine the chain of dependencies.
   for an object `v::$NamedVar`.
 """
 function CodeEdges(src::CodeInfo)
+    src.inferred && error("supply lowered but not inferred code")
     cl = CodeLinks(src)
     CodeEdges(src, cl)
 end
@@ -490,9 +502,8 @@ end
 
 Interweave display of code and edges.
 
-!!! compat "Julia 1.6"
+!!! compat Julia 1.6
     This function produces dummy output if suitable support is missing in your version of Julia.
-
 """
 function print_with_code(io::IO, src::CodeInfo, edges::CodeEdges)
     function preprint(io::IO)
@@ -610,8 +621,6 @@ function lines_required!(isrequired::AbstractVector{Bool}, objs, src::CodeInfo, 
 
     # Compute basic blocks, which we'll use to make sure we mark necessary control-flow
     cfg = Core.Compiler.compute_basic_blocks(src.code)  # needed for control-flow analysis
-    domtree = construct_domtree(cfg.blocks)
-    postdomtree = construct_postdomtree(cfg.blocks)
 
     # We'll mostly use generic graph traversal to discover all the lines we need,
     # but structs are in a bit of a different category (especially on Julia 1.5+).
@@ -630,12 +639,10 @@ function lines_required!(isrequired::AbstractVector{Bool}, objs, src::CodeInfo, 
         changed |= add_named_dependencies!(isrequired, edges, objs, norequire)
 
         # Add control-flow
-        changed |= add_loops!(isrequired, cfg)
-        changed |= add_control_flow!(isrequired, cfg, domtree, postdomtree)
+        changed |= add_control_flow!(isrequired, cfg, norequire)
 
         # So far, everything is generic graph traversal. Now we add some domain-specific information
         changed |= add_typedefs!(isrequired, src, edges, typedefs, norequire)
-        changed |= add_inplace!(isrequired, src, edges, norequire)
 
         iter += 1  # just for diagnostics
     end
@@ -706,68 +713,40 @@ function add_obj!(isrequired, objs, obj, edges::CodeEdges, norequire)
     return chngd
 end
 
-## Add control-flow
-
-# Mark loops that contain evaluated statements
-function add_loops!(isrequired, cfg)
+# Add control-flow. For any basic block with an evaluated statement inside it,
+# check to see if the block has any successors, and if so mark that block's exit statement.
+# Likewise, any preceding blocks should have *their* exit statement marked.
+function add_control_flow!(isrequired, cfg, norequire)
     changed = false
-    for (ibb, bb) in enumerate(cfg.blocks)
-        needed = false
-        for ibbp in bb.preds
-            # Is there a backwards-pointing predecessor, and if so are there any required statements between the two?
-            ibbp > ibb || continue   # not a loop-block predecessor
-            r, rp = rng(bb), rng(cfg.blocks[ibbp])
-            r = first(r):first(rp)-1
-            needed |= any(view(isrequired, r))
-        end
-        if needed
-            # Mark the final statement of all predecessors
-            for ibbp in bb.preds
-                rp = rng(cfg.blocks[ibbp])
-                changed |= !isrequired[last(rp)]
-                isrequired[last(rp)] = true
-            end
-        end
-    end
-    return changed
-end
-
-function add_control_flow!(isrequired, cfg, domtree, postdomtree)
-    changed, _changed = false, true
     blocks = cfg.blocks
     nblocks = length(blocks)
+    _changed = true
     while _changed
         _changed = false
         for (ibb, bb) in enumerate(blocks)
             r = rng(bb)
             if any(view(isrequired, r))
-                # Walk up the dominators
-                jbb = ibb
-                while jbb != 1
-                    jdbb = domtree.idoms_bb[jbb]
-                    dbb = blocks[jdbb]
-                    # Check the successors; if jbb doesn't post-dominate, mark the last statement
-                    for s in dbb.succs
-                        if !postdominates(postdomtree, jbb, s)
-                            idxlast = rng(dbb)[end]
-                            _changed |= !isrequired[idxlast]
-                            isrequired[idxlast] = true
-                            break
-                        end
-                    end
-                    jbb = jdbb
+                if ibb != nblocks
+                    idxlast = r[end]
+                    idxlast ∈ norequire && continue
+                    _changed |= !isrequired[idxlast]
+                    isrequired[idxlast] = true
                 end
-                # Walk down the post-dominators, including self
-                jbb = ibb
-                while jbb != 0 && jbb < nblocks
-                    pdbb = blocks[jbb]
-                    # Check if the exit of this block is a GotoNode or `return`
-                    if length(pdbb.succs) < 2
-                        idxlast = rng(pdbb)[end]
-                        _changed |= !isrequired[idxlast]
-                        isrequired[idxlast] = true
-                    end
-                    jbb = postdomtree.idoms_bb[jbb]
+                for ibbp in bb.preds
+                    ibbp > 0 || continue # see Core.Compiler.compute_basic_blocks, near comment re :enter
+                    rpred = rng(blocks[ibbp])
+                    idxlast = rpred[end]
+                    idxlast ∈ norequire && continue
+                    _changed |= !isrequired[idxlast]
+                    isrequired[idxlast] = true
+                end
+                for ibbs in bb.succs
+                    ibbs == nblocks && continue
+                    rpred = rng(blocks[ibbs])
+                    idxlast = rpred[end]
+                    idxlast ∈ norequire && continue
+                    _changed |= !isrequired[idxlast]
+                    isrequired[idxlast] = true
                 end
             end
         end
@@ -851,53 +830,6 @@ function add_typedefs!(isrequired, src::CodeInfo, edges::CodeEdges, (typedef_blo
     return changed
 end
 
-# For arrays, add any `push!`, `pop!`, `empty!` or `setindex!` statements
-# This is needed for the "Modify @enum" test in Revise
-function add_inplace!(isrequired, src, edges, norequire)
-    function mark_if_inplace(stmt, j)
-        _changed = false
-        fname = stmt.args[1]
-        if (callee_matches(fname, Base, :push!) ||
-            callee_matches(fname, Base, :pop!) ||
-            callee_matches(fname, Base, :empty!) ||
-            callee_matches(fname, Base, :setindex!))
-            _changed = !isrequired[j]
-            isrequired[j] = true
-        end
-        return _changed
-    end
-
-    changed = false
-    for (i, isreq) in pairs(isrequired)
-        isreq || continue
-        for j in edges.succs[i]
-            j ∈ norequire && continue
-            stmt = src.code[j]
-            if isexpr(stmt, :call) && length(stmt.args) >= 2
-                arg = stmt.args[2]
-                if @isssa(arg) && arg.id == i
-                    changed |= mark_if_inplace(stmt, j)
-                elseif @issslotnum(arg)
-                    id = arg.id
-                    # Check to see if we use this slot
-                    for k in edges.preds[j]
-                        isrequired[k] || continue
-                        predstmt = src.code[k]
-                        if isexpr(predstmt, :(=))
-                            lhs = predstmt.args[1]
-                            if @issslotnum(lhs) && lhs.id == id
-                                changed |= mark_if_inplace(stmt, j)
-                                break
-                            end
-                        end
-                    end
-                end
-            end
-        end
-    end
-    return changed
-end
-
 """
     selective_eval!([recurse], frame::Frame, isrequired::AbstractVector{Bool}, istoplevel=false)
 
@@ -930,7 +862,7 @@ function selective_eval!(@nospecialize(recurse), frame::Frame, isrequired::Abstr
     pcexec = (pcexec === nothing ? pclast : pcexec)::Int
     frame.pc = pcexec
     node = pc_expr(frame)
-    is_return(node) && return isrequired[pcexec] ? lookup_return(frame, node) : nothing
+    is_return(node) && return lookup_return(frame, node)
     isassigned(frame.framedata.ssavalues, pcexec) && return frame.framedata.ssavalues[pcexec]
     return nothing
 end
@@ -958,9 +890,8 @@ end
 
 Mark each line of code with its requirement status.
 
-!!! compat "Julia 1.6"
+!!! compat Julia 1.6
     This function produces dummy output if suitable support is missing in your version of Julia.
-
 """
 function print_with_code(io::IO, src::CodeInfo, isrequired::AbstractVector{Bool})
     nd = ndigits(length(isrequired))

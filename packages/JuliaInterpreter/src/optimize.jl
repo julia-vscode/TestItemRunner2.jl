@@ -1,12 +1,100 @@
+const calllike = (:call, :foreigncall)
+
 const compiled_calls = Dict{Any,Any}()
 
+function extract_inner_call!(stmt::Expr, idx, once::Bool=false)
+    (stmt.head === :toplevel || stmt.head === :thunk) && return nothing
+    once |= stmt.head ∈ calllike
+    for (i, a) in enumerate(stmt.args)
+        isa(a, Expr) || continue
+        # Make sure we don't "damage" special syntax that requires literals
+        if i == 1 && stmt.head === :foreigncall
+            continue
+        end
+        if i == 2 && stmt.head === :call && stmt.args[1] === :cglobal
+            continue
+        end
+        ret = extract_inner_call!(a, idx, once) # doing this first extracts innermost calls
+        ret !== nothing && return ret
+        iscalllike = a.head ∈ calllike
+        if once && iscalllike
+            stmt.args[i] = NewSSAValue(idx)
+            return a
+        end
+    end
+    return nothing
+end
+
+function replace_ssa(@nospecialize(stmt), ssalookup)
+    isa(stmt, Expr) || return stmt
+    return Expr(stmt.head, Any[
+        if isa(a, SSAValue)
+            SSAValue(ssalookup[a.id])
+        elseif isa(a, NewSSAValue)
+            SSAValue(a.id)
+        else
+            replace_ssa(a, ssalookup)
+        end
+        for a in stmt.args
+    ]...)
+end
+
+function renumber_ssa!(stmts::Vector{Any}, ssalookup)
+    # When updating jumps, when lines get split into multiple lines
+    # (see "Un-nest :call expressions" below), we need to jump to the first of them.
+    # Consequently we use the previous "old-code" offset and add one.
+    # Fixes #455.
+    jumplookup(l, idx) = idx > 1 ? l[idx-1] + 1 : idx
+
+    for (i, stmt) in enumerate(stmts)
+        if isa(stmt, GotoNode)
+            stmts[i] = GotoNode(jumplookup(ssalookup, stmt.label))
+        elseif isa(stmt, SSAValue)
+            stmts[i] = SSAValue(ssalookup[stmt.id])
+        elseif isa(stmt, NewSSAValue)
+            stmts[i] = SSAValue(stmt.id)
+        elseif isa(stmt, Expr)
+            stmt = replace_ssa(stmt, ssalookup)
+            if (stmt.head === :gotoifnot || stmt.head === :enter) && isa(stmt.args[end], Int)
+                stmt.args[end] = jumplookup(ssalookup, stmt.args[end])
+            end
+            stmts[i] = stmt
+        elseif is_GotoIfNot(stmt)
+            cond = (stmt::Core.GotoIfNot).cond
+            if isa(cond, SSAValue)
+                cond = SSAValue(ssalookup[cond.id])
+            end
+            stmts[i] = Core.GotoIfNot(cond, jumplookup(ssalookup, stmt.dest))
+        elseif is_ReturnNode(stmt)
+            val = (stmt::Core.ReturnNode).val
+            if isa(val, SSAValue)
+                stmts[i] = Core.ReturnNode(SSAValue(ssalookup[val.id]))
+            end
+        end
+    end
+    return stmts
+end
+
+function compute_ssa_mapping_delete_statements!(code::CodeInfo, stmts::Vector{Int})
+    stmts = unique!(sort!(stmts))
+    ssalookup = collect(1:length(codelocs(code)))
+    cnt = 1
+    for i in 1:length(stmts)
+        start = stmts[i] + 1
+        stop = i == length(stmts) ? length(codelocs(code)) : stmts[i+1]
+        ssalookup[start:stop] .-= cnt
+        cnt += 1
+    end
+    return ssalookup
+end
+
 # Pre-frame-construction lookup
-function lookup_stmt(stmts::Vector{Any}, @nospecialize arg)
+function lookup_stmt(stmts, arg)
     if isa(arg, SSAValue)
         arg = stmts[arg.id]
     end
     if isa(arg, QuoteNode)
-        return arg.value
+        arg = arg.value
     end
     return arg
 end
@@ -24,16 +112,16 @@ function smallest_ref(stmts, arg, idmin)
 end
 
 function lookup_global_ref(a::GlobalRef)
-    if Base.isbindingresolved(a.mod, a.name) && isdefined(a.mod, a.name)
-        return QuoteNode(getfield(a.mod, a.name))
+    if isdefined(a.mod, a.name) && isconst(a.mod, a.name)
+        r = getfield(a.mod, a.name)
+        return QuoteNode(r)
+    else
+        return a
     end
-    return a
 end
 
 function lookup_global_refs!(ex::Expr)
-    if isexpr(ex, (:isdefined, :thunk, :toplevel, :method, :global, :const))
-        return nothing
-    end
+    (ex.head === :isdefined || ex.head === :thunk || ex.head === :toplevel) && return nothing
     for (i, a) in enumerate(ex.args)
         ex.head === :(=) && i == 1 && continue # Don't look up globalrefs on the LHS of an assignment (issue #98)
         if isa(a, GlobalRef)
@@ -45,26 +133,15 @@ function lookup_global_refs!(ex::Expr)
     return nothing
 end
 
-function lookup_getproperties(code::Vector{Any}, @nospecialize a)
-    isexpr(a, :call) || return a
-    length(a.args) == 3 || return a
-    arg1 = lookup_stmt(code, a.args[1])
-    arg1 === Base.getproperty || return a
-    arg2 = lookup_stmt(code, a.args[2])
-    arg2 isa Module || return a
-    arg3 = lookup_stmt(code, a.args[3])
-    arg3 isa Symbol || return a
-    return lookup_global_ref(GlobalRef(arg2, arg3))
+function lookup_getproperties(a::Expr)
+    if a.head === :call && length(a.args) == 3 &&
+        a.args[1] isa QuoteNode && a.args[1].value === Base.getproperty &&
+        a.args[2] isa QuoteNode && a.args[2].value isa Module           &&
+        a.args[3] isa QuoteNode && a.args[3].value isa Symbol
+        return lookup_global_ref(Core.GlobalRef(a.args[2].value, a.args[3].value))
+    end
+    return a
 end
-
-# HACK This isn't optimization really, but necessary to bypass llvmcall and foreigncall
-# TODO This "optimization" should be refactored into a "minimum compilation" necessary to
-# execute `llvmcall` and `foreigncall` and pure optimizations on the lowered code representation.
-# In particular, the optimization that replaces `GlobalRef` with `QuoteNode` is invalid and
-# should be removed: This is because it is not possible to know when and where the binding
-# will be resolved without executing the code.
-# Since the current `build_compiled_[llvmcall|foreigncall]!` relies on this replacement,
-# they also need to be reimplemented.
 
 """
     optimize!(code::CodeInfo, mod::Module)
@@ -79,8 +156,8 @@ function optimize!(code::CodeInfo, scope)
     mod = moduleof(scope)
     evalmod = mod == Core.Compiler ? Core.Compiler : CompiledCalls
     sparams = scope isa Method ? sparam_syms(scope) : Symbol[]
+    code.inferred && error("optimization of inferred code not implemented")
     replace_coretypes!(code)
-
     # TODO: because of builtins.jl, for CodeInfos like
     #   %1 = Core.apply_type
     #   %2 = (%1)(args...)
@@ -94,15 +171,14 @@ function optimize!(code::CodeInfo, scope)
                 continue
             else
                 lookup_global_refs!(stmt)
-                code.code[i] = lookup_getproperties(code.code, stmt)
+                code.code[i] = lookup_getproperties(stmt)
             end
         end
     end
 
     # Replace :llvmcall and :foreigncall with compiled variants. See
     # https://github.com/JuliaDebug/JuliaInterpreter.jl/issues/13#issuecomment-464880123
-    # Insert the foreigncall wrappers at the updated idxs
-    methodtables = Vector{Union{Compiled,DispatchableMethod}}(undef, length(code.code))
+    foreigncalls_idx = Int[]
     for (idx, stmt) in enumerate(code.code)
         # Foregincalls can be rhs of assignments
         if isexpr(stmt, :(=))
@@ -115,14 +191,45 @@ function optimize!(code::CodeInfo, scope)
                 if (arg1 === :llvmcall || lookup_stmt(code.code, arg1) === Base.llvmcall) && isempty(sparams) && scope isa Method
                     # Call via `invokelatest` to avoid compiling it until we need it
                     Base.invokelatest(build_compiled_llvmcall!, stmt, code, idx, evalmod)
-                    methodtables[idx] = Compiled()
+                    push!(foreigncalls_idx, idx)
                 end
             elseif stmt.head === :foreigncall && scope isa Method
                 # Call via `invokelatest` to avoid compiling it until we need it
                 Base.invokelatest(build_compiled_foreigncall!, stmt, code, sparams, evalmod)
-                methodtables[idx] = Compiled()
+                push!(foreigncalls_idx, idx)
             end
         end
+    end
+
+    ## Un-nest :call expressions (so that there will be only one :call per line)
+    # This will allow us to re-use args-buffers rather than having to allocate new ones each time.
+    old_code, old_codelocs = code.code, codelocs(code)
+    code.code = new_code = eltype(old_code)[]
+    code.codelocs = new_codelocs = Int32[]
+    ssainc = fill(1, length(old_code))
+    for (i, stmt) in enumerate(old_code)
+        loc = old_codelocs[i]
+        if isa(stmt, Expr)
+            inner = extract_inner_call!(stmt, length(new_code)+1)
+            while inner !== nothing
+                push!(new_code, inner)
+                push!(new_codelocs, loc)
+                ssainc[i] += 1
+                inner = extract_inner_call!(stmt, length(new_code)+1)
+            end
+        end
+        push!(new_code, stmt)
+        push!(new_codelocs, loc)
+    end
+    # Fix all the SSAValues and GotoNodes
+    ssalookup = cumsum(ssainc)
+    renumber_ssa!(new_code, ssalookup)
+    code.ssavaluetypes = length(new_code)
+
+    # Insert the foreigncall wrappers at the updated idxs
+    methodtables = Vector{Union{Compiled,DispatchableMethod}}(undef, length(code.code))
+    for idx in foreigncalls_idx
+        methodtables[ssalookup[idx]] = Compiled()
     end
 
     return code, methodtables
@@ -147,7 +254,7 @@ function parametric_type_to_expr(@nospecialize(t::Type))
     return t
 end
 
-function build_compiled_llvmcall!(stmt::Expr, code::CodeInfo, idx::Int, evalmod::Module)
+function build_compiled_llvmcall!(stmt::Expr, code, idx, evalmod)
     # Run a mini-interpreter to extract the types
     framecode = FrameCode(CompiledCalls, code; optimize=false)
     frame = Frame(framecode, prepare_framedata(framecode, []))
@@ -184,8 +291,9 @@ function build_compiled_llvmcall!(stmt::Expr, code::CodeInfo, idx::Int, evalmod:
     append!(stmt.args, args)
 end
 
+
 # Handle :llvmcall & :foreigncall (issue #28)
-function build_compiled_foreigncall!(stmt::Expr, code::CodeInfo, sparams::Vector{Symbol}, evalmod::Module)
+function build_compiled_foreigncall!(stmt::Expr, code, sparams::Vector{Symbol}, evalmod)
     TVal = evalmod == Core.Compiler ? Core.Compiler.Val : Val
     cfunc, RetType, ArgType = lookup_stmt(code.code, stmt.args[1]), stmt.args[2], stmt.args[3]::SimpleVector
 
@@ -252,7 +360,7 @@ function build_compiled_foreigncall!(stmt::Expr, code::CodeInfo, sparams::Vector
     return nothing
 end
 
-function replace_coretypes!(@nospecialize(src); rev::Bool=false)
+function replace_coretypes!(src; rev::Bool=false)
     if isa(src, CodeInfo)
         replace_coretypes_list!(src.code; rev=rev)
     elseif isa(src, Expr)
@@ -261,48 +369,41 @@ function replace_coretypes!(@nospecialize(src); rev::Bool=false)
     return src
 end
 
-function replace_coretypes_list!(list::AbstractVector; rev::Bool=false)
+function replace_coretypes_list!(list::AbstractVector; rev::Bool)
     function rep(@nospecialize(x), rev::Bool)
         if rev
-            isa(x, SSAValue) && return Core.SSAValue(x.id)
-            isa(x, SlotNumber) && return Core.SlotNumber(x.id)
-            return x
-        else
-            isa(x, Core.SSAValue) && return SSAValue(x.id)
-            isa(x, Core.SlotNumber) && return SlotNumber(x.id)
-            @static if VERSION < v"1.11.0-DEV.337"
-                @static if VERSION ≥ v"1.10.0-DEV.631"
-                    isa(x, Core.Compiler.TypedSlot) && return SlotNumber(x.id)
-                else
-                    isa(x, Core.TypedSlot) && return SlotNumber(x.id)
-                end
+            if isa(x, SSAValue)
+                return Core.SSAValue(x.id)
+            elseif isa(x, SlotNumber)
+                return Core.SlotNumber(x.id)
             end
             return x
         end
+        if isa(x, Core.SSAValue)
+            return SSAValue(x.id)
+        elseif isa(x, Core.SlotNumber) || isa(x, Core.TypedSlot)
+            return SlotNumber(x.id)
+        end
+        return x
     end
 
     for (i, stmt) in enumerate(list)
         rstmt = rep(stmt, rev)
         if rstmt !== stmt
             list[i] = rstmt
-        elseif isa(stmt, GotoIfNot)
+        elseif is_GotoIfNot(stmt)
+            stmt = stmt::Core.GotoIfNot
             cond = stmt.cond
             rcond = rep(cond, rev)
             if rcond !== cond
-                list[i] = GotoIfNot(rcond, stmt.dest)
+                list[i] = Core.GotoIfNot(rcond, stmt.dest)
             end
-        elseif isa(stmt, ReturnNode)
+        elseif is_ReturnNode(stmt)
+            stmt = stmt::Core.ReturnNode
             val = stmt.val
             rval = rep(val, rev)
             if rval !== val
-                list[i] = ReturnNode(rval)
-            end
-        elseif @static (isdefined(Core.IR, :EnterNode) && true) && isa(stmt, Core.IR.EnterNode)
-            if isdefined(stmt, :scope)
-                rscope = rep(stmt.scope, rev)
-                if rscope !== stmt.scope
-                    list[i] = Core.IR.EnterNode(stmt.catch_dest, rscope)
-                end
+                list[i] = Core.ReturnNode(rval)
             end
         elseif isa(stmt, Expr)
             replace_coretypes!(stmt; rev=rev)

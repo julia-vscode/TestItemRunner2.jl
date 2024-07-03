@@ -1,11 +1,11 @@
 # This should stay as the first method because it's used in a test
 # (or change the test)
-function checkname(fdef::Expr, name)   # this is now unused
-    fdef.head === :call || return false
+function checkname(fdef::Expr, name)
     fproto = fdef.args[1]
+    (fdef.head === :where || fdef.head == :(::)) && return checkname(fproto, name)
+    fdef.head === :call || return false
     if fproto isa Expr
-        fproto.head == :(::) && return last(fproto.args) === name  # (obj::MyCallable)(x) = ...
-        fproto.head == :curly && return fproto.args[1] === name   # MyType{T}(x) = ...
+        fproto.head == :(::) && return last(fproto.args) == name
         # A metaprogramming-generated function
         fproto.head === :$ && return true   # uncheckable, let's assume all is well
         # Is the check below redundant?
@@ -16,151 +16,25 @@ function checkname(fdef::Expr, name)   # this is now unused
     isa(fproto, Symbol) || isa(fproto, QuoteNode) || isa(fproto, Expr) || return false
     return checkname(fproto, name)
 end
-
-function get_call_expr(@nospecialize(ex))
-    while isa(ex, Expr) && ex.head ∈ (:where, :(::))
-        ex = ex.args[1]
-    end
-    isexpr(ex, :call) && return ex
-    return nothing
-end
-
-function get_func_expr(@nospecialize(ex))
-    isa(ex, Expr) || return ex
-    # Strip any macros that wrap the method definition
-    while isa(ex, Expr) && ex.head ∈ (:toplevel, :macrocall, :global, :local)
-        ex.head == :macrocall && length(ex.args) < 3 && return ex
-        ex = ex.args[end]
-    end
-    isa(ex, Expr) || return ex
-    if ex.head == :(=) && length(ex.args) == 2
-        child1, child2 = ex.args
-        isexpr(get_call_expr(child1), :call) && return ex
-        isexpr(child2, :(->)) && return child2
-    end
-    return ex
-end
-
-function is_func_expr(@nospecialize(ex))
-    isa(ex, Expr) || return false
-    ex.head ∈ (:function, :(->)) && return true
-    if ex.head == :(=) && length(ex.args) == 2
-        child1 = ex.args[1]
-        isexpr(get_call_expr(child1), :call) && return true
-    end
+checkname(fname::Symbol, name::Symbol) = begin
+    fname === name && return true
+    startswith(string(name), string('#', fname, '#')) && return true
+    string(name) == string(fname, "##kw") && return true
     return false
 end
+checkname(fname::Symbol, ::Nothing) = true
+checkname(fname::QuoteNode, name) = checkname(fname.value, name)
 
-function is_func_expr(@nospecialize(ex), name::Symbol)
-    ex = get_func_expr(ex)
-    is_func_expr(ex) || return false
-    return checkname(get_call_expr(ex.args[1]), name)
-end
-
-function is_func_expr(@nospecialize(ex), meth::Method)
-    ex = get_func_expr(ex)
-    is_func_expr(ex) || return false
-    fname = nothing
-    if ex.head == :(->)
-        exargs = ex.args[1]
-        if isexpr(exargs, :tuple)
-            exargs = exargs.args
-        elseif (isa(exargs, Expr) && exargs.head ∈ (:(::), :.)) || isa(exargs, Symbol)
-            exargs = [exargs]
-        elseif isa(exargs, Expr)
-            return false
-        end
-    else
-        callex = get_call_expr(ex.args[1])
-        isexpr(callex, :call) || return false
-        fname = callex.args[1]
-        modified = true
-        while modified
-            modified = false
-            if isexpr(fname, :curly)    # where clause
-                fname = fname.args[1]
-                modified = true
-            end
-            if isexpr(fname, :., 2)        # module-qualified
-                fname = fname.args[2]
-                @assert isa(fname, QuoteNode)
-                fname = fname.value
-                modified = true
-            end
-            if isexpr(fname, :(::))
-                fname = fname.args[end]
-                modified = true
-            end
-            if isexpr(fname, :where)
-                fname = fname.args[1]
-                modified = true
-            end
-        end
-        if !(isa(fname, Symbol) && is_gensym(fname)) && !isexpr(fname, :$)
-            if fname === :Type && isexpr(ex.args[1], :where) && isexpr(callex.args[1], :(::)) && isexpr(callex.args[1].args[end], :curly)
-                Tsym = callex.args[1].args[end].args[2]
-                whereex = ex.args[1]
-                while true
-                    found = false
-                    for wheretyp in whereex.args[2:end]
-                        isexpr(wheretyp, :(<:)) || continue
-                        if Tsym == wheretyp.args[1]
-                            fname = wheretyp.args[2]
-                            found = true
-                            break
-                        end
-                    end
-                    found && break
-                    whereex = whereex.args[1]
-                end
-            end
-            # match the function name
-            if isexpr(fname, :curly)
-                fname = fname.args[1]
-            end
-            fname === strip_gensym(meth.name) || return false
-        end
-        exargs = callex.args[2:end]
+function isfuncexpr(ex, name=nothing)
+    # Strip any macros that wrap the method definition
+    while ex isa Expr && ex.head === :macrocall && length(ex.args) == 3
+        ex = ex.args[3]
     end
-    # match the argnames
-    if !isempty(exargs) && isexpr(first(exargs), :parameters)
-        popfirst!(exargs)   # don't match kwargs
+    isa(ex, Expr) || return false
+    if ex.head === :function || ex.head === :(=)
+        return checkname(ex.args[1], name)
     end
-    margs = Base.method_argnames(meth)
-    _, idx = kwmethod_basename(meth)
-    if idx > 0
-        margs = margs[idx:end]
-    end
-    for (arg, marg) in zip(exargs, margs[2:end])
-        if isexpr(arg, :$)
-            # If this is a splat, we may not even have the right number of args. In that case,
-            # just trust the matching we've done so far.
-            lastarg = arg.args[end]
-            isexpr(lastarg, :...) && return true
-            continue
-        end
-        if isexpr(arg, :...)   # also test the other order of $ and ..., e.g., `c470($argnames...)`
-            lastarg = only(arg.args)
-            isexpr(lastarg, :$) && return true
-        end
-        aname = get_argname(arg)
-        aname === :_ && continue
-        aname === marg || (aname === Symbol("#unused#") && marg === Symbol("")) || return false
-    end
-    return true  # this will match any fcn `() -> ...`, but file/line is the only thing we have
-end
-
-function get_argname(@nospecialize(ex))
-    isa(ex, Symbol) && return ex
-    isexpr(ex, :(::), 2) && return get_argname(ex.args[1])      # type-asserted
-    isexpr(ex, :(::), 1) && return Symbol("#unused#") # nameless args (e.g., `::Type{String}`)
-    isexpr(ex, :kw) && return get_argname(ex.args[1])           # default value
-    isexpr(ex, :(=)) && return get_argname(ex.args[1])          # default value inside `@nospecialize`
-    isexpr(ex, :macrocall) && return get_argname(ex.args[end])  # @nospecialize
-    isexpr(ex, :...) && return get_argname(only(ex.args))       # varargs
-    isexpr(ex, :tuple) && return Symbol("")                     # tuple-destructuring
-    dump(ex)
-    error("unexpected argument ", ex)
+    return false
 end
 
 function linerange(def::Expr)
@@ -186,74 +60,11 @@ end
 fileline(lin::LineInfoNode)   = String(lin.file), lin.line
 fileline(lnn::LineNumberNode) = String(lnn.file), lnn.line
 
+# This is piracy, but it's not ambiguous in terms of what it should do
+Base.convert(::Type{LineNumberNode}, lin::LineInfoNode) = LineNumberNode(lin.line, lin.file)
+
 # This regex matches the pseudo-file name of a REPL history entry.
 const rREPL = r"^REPL\[(\d+)\]$"
-# Match anonymous function names
-const rexfanon = r"^#\d+$"
-# Match kwfunc method names
-const rexkwfunc = r"^#.*##kw$"
-
-is_gensym(s::Symbol) = is_gensym(string(s))
-is_gensym(str::AbstractString) = startswith(str, '#')
-
-strip_gensym(s::Symbol) = strip_gensym(string(s))
-function strip_gensym(str::AbstractString)
-    if startswith(str, '#')
-        idx = findnext('#', str, 2)
-        if idx !== nothing
-            return Symbol(str[2:idx-1])
-        end
-    end
-    endswith(str, "##kw") && return Symbol(str[1:end-4])
-    return Symbol(str)
-end
-
-if isdefined(Core, :kwcall)
-    is_kw_call(m::Method) = Base.unwrap_unionall(m.sig).parameters[1] === typeof(Core.kwcall)
-else
-    function is_kw_call(m::Method)
-        T = Base.unwrap_unionall(m.sig).parameters[1]
-        return match(rexkwfunc, string(T.name.name)) !== nothing
-    end
-end
-
-# is_body_fcn(m::Method, basename::Symbol) = match(Regex("^#$basename#\\d+\$"), string(m.name)) !== nothing
-# function is_body_fcn(m::Method, basename::Expr)
-#     basename.head == :. || return false
-#     return is_body_fcn(m, get_basename(basename))
-# end
-# is_body_fcn(m::Method, ::Nothing) = false
-# function get_basename(basename::Expr)
-#     bn = basename.args[end]
-#     @assert isa(bn, QuoteNode)
-#     return is_body_fcn(m, bn.value)
-# end
-
-function kwmethod_basename(meth::Method)
-    name = meth.name
-    sname = string(name)
-    mtch = match(r"^(.*)##kw$", sname)
-    if mtch === nothing
-        mtch = match(r"^#+(.*)#", sname)
-    end
-    name = mtch === nothing ? name : Symbol(only(mtch.captures))
-    ftypname = Symbol(string('#', name))
-    idx = findfirst(Base.unwrap_unionall(meth.sig).parameters) do @nospecialize(T)
-        if isa(T, DataType)
-            Tname = T.name.name
-            if Tname === :Type
-                p1 = Base.unwrap_unionall(T.parameters[1])
-                Tname = isa(p1, DataType) ? p1.name.name :
-                        isa(p1, TypeVar) ? p1.name : error("unexpected type ", typeof(p1), "for ", meth)
-                return Tname == name
-            end
-            return ftypname === Tname
-        end
-        false
-    end
-    idx === nothing && return name, 0
-    return name, idx
-end
 
 """
     src = src_from_file_or_REPL(origin::AbstractString, repl = Base.active_repl)

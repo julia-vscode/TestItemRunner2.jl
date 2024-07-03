@@ -32,7 +32,7 @@ Both options are described below.
     and [here](https://git-scm.com/book/en/v2/Getting-Started-First-Time-Git-Setup).
     It's also helpful to sign up for a [GitHub account](https://github.com/)
     and set git's `github.user` variable.
-    The [PkgTemplates documentation](https://juliaci.github.io/PkgTemplates.jl/stable/)
+    The [PkgTemplates documentation](https://invenia.github.io/PkgTemplates.jl/stable/)
     may also be useful.
 
     If you struggle with this part, consider trying the "plain" `Pkg` variant below.
@@ -70,22 +70,16 @@ Generating project MyPkg:
 In the first few lines you can see the location of your new package, here
 the directory `/home/tim/.julia/dev/MyPkg`.
 
-Press `]` to enter the [Pkg REPL](https://pkgdocs.julialang.org/v1/getting-started/#Basic-Usage).
-Then add the new package to your current environment with the `dev` command.
-
-```julia
-(<environment>) pkg> dev MyPkg   # the dev command will look in the ~/.julia/dev folder automatically
-```
-
-Press the backspace key to return to the Julia REPL.
-
-Now let's try it out:
+Before doing anything else, let's try it out:
 
 ```julia
 julia> using Revise   # you must do this before loading any revisable packages
 
 julia> using MyPkg
 [ Info: Precompiling MyPkg [102b5b08-597c-4d40-b98a-e9249f4d01f4]
+
+julia> MyPkg.greet()
+Hello World!
 ```
 
 (It's perfectly fine if you see a different string of digits and letters after the "Precompiling MyPkg" message.)
@@ -105,28 +99,28 @@ You should see something like this:
 ```julia
 module MyPkg
 
-# Write your package code here.
-
-end
-```
-
-This is the basic package created by PkgTemplates.
-Let's create a simple `greet` function to return a message:
-
-```julia
-module MyPkg
-
 greet() = print("Hello World!")
 
 end # module
 ```
 
-Now go back to that same Julia session, and try calling `greet`.
+This is the basic package created by PkgTemplates. Let's modify `greet` to return
+a different message:
+
+```julia
+module MyPkg
+
+greet() = print("Hello, revised World!")
+
+end # module
+```
+
+Now go back to that same Julia session, and try calling `greet` again.
 After a pause (while Revise's internal code compiles), you should see
 
 ```julia
 julia> MyPkg.greet()
-Hello World!
+Hello, revised World!
 ```
 
 From this point forward, revisions should be fast. You can modify `MyPkg.jl`
@@ -142,7 +136,7 @@ above, you might first have to delete the package with `Pkg.rm("MyPkg")` followi
 a complete removal from your `dev` directory.)
 
 ```julia
-julia> using Revise, Pkg
+julia> using Pkg
 
 julia> cd(Pkg.devdir())   # take us to the standard "development directory"
 

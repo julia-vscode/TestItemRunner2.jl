@@ -38,7 +38,7 @@ end
     @test Aborted(frame, i).at.line == 6
     # Check conditional
     frame = Frame(modexs[4]...)
-    i = findfirst(stmt->isa(stmt, Core.GotoIfNot), frame.framecode.src.code) + 1
+    i = findfirst(stmt->JuliaInterpreter.is_gotoifnot(stmt), frame.framecode.src.code) + 1
     @test Aborted(frame, i).at.line == 9
     # Check macro
     frame = Frame(modexs[5]...)
@@ -85,16 +85,10 @@ module EvalLimited end
         insert!(ex.args, 1, LineNumberNode(1, Symbol("fake.jl")))
     end
     modexs = collect(ExprSplitter(EvalLimited, ex))
-    @static if VERSION >= v"1.11-"
-        nstmts = 10*17 + 20 # 10 * 17 statements per iteration + α
-    elseif VERSION >= v"1.10-"
-        nstmts = 10*15 + 20 # 10 * 15 statements per iteration + α
-    elseif isdefined(Core, :get_binding_type)
-        nstmts = 10*14 + 20 # 10 * 14 statements per iteration + α
-    elseif VERSION >= v"1.7-"
-        nstmts = 10*11 + 20 # 10 * 9 statements per iteration + α
+    @static if isdefined(Core, :get_binding_type)
+        nstmts = 10*12 + 20 # 10 * 12 statements per iteration + α
     else
-        nstmts = 10*10 + 20 # 10 * 10 statements per iteration + α
+        nstmts = 9*12 + 20 # 10 * 9 statements per iteration + α
     end
     for (mod, ex) in modexs
         frame = Frame(mod, ex)
@@ -126,6 +120,9 @@ module EvalLimited end
     @test EvalLimited.s < 5
     @test length(aborts) == 1
     lin = aborts[1].at
-    @test lin.file === Symbol("fake.jl")
-    @test lin.line ∈ (2, 3, 4, 5)
+    if lin.file === Symbol("fake.jl")
+        @test lin.line ∈ (2, 3, 4, 5)
+    else
+        @test lin.method === :iterate || lin.method === :getproperty
+    end
 end

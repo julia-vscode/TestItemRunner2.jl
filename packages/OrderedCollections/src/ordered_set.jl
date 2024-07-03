@@ -1,32 +1,17 @@
-"""
-    OrderedSet
+# ordered sets
 
-`OrderedSet`s are simply sets whose entries have a particular order. The order
-refers to insertion order, which allows deterministic iteration over the set.
+# This was largely copied and modified from Base
 
-Note: To create an OrderedSet of a particular type, you must specify the type, such as,
 
-```julia
-os = OrderedSet{Int}(3)
-push!(os, [1,2]...)
-```
-"""
 struct OrderedSet{T}  <: AbstractSet{T}
     dict::OrderedDict{T,Nothing}
 
     OrderedSet{T}() where {T} = new{T}(OrderedDict{T,Nothing}())
-    OrderedSet{T}(xs) where {T} = union!(OrderedSet{T}(), xs)
-    function OrderedSet{T}(s::Base.KeySet{T, <:OrderedDict{T}}) where {T}
-        d = s.dict
-        slots = copy(d.slots)
-        keys = copy(d.keys)
-        vals = similar(d.vals, Nothing)
-        new{T}(OrderedDict{T,Nothing}(slots, keys, vals, d.ndel, d.maxprobe, d.dirty))
-    end
+    OrderedSet{T}(xs) where {T} = union!(new{T}(OrderedDict{T,Nothing}()), xs)
 end
-
 OrderedSet() = OrderedSet{Any}()
 OrderedSet(xs) = OrderedSet{eltype(xs)}(xs)
+
 
 show(io::IO, s::OrderedSet) = (show(io, typeof(s)); print(io, "("); !isempty(s) && Base.show_vector(io, s,'[',']'); print(io, ")"))
 
@@ -61,15 +46,10 @@ function iterate(s::OrderedSet, i)
     return (s.dict.keys[i], i+1)
 end
 
-# lazy reverse iteration
-function iterate(rs::Iterators.Reverse{<:OrderedSet}, i = length(rs.itr))
-    s = rs.itr
-    i < 1 && return nothing
-    return (s.dict.keys[i], i-1)
-end
-
 pop!(s::OrderedSet) = pop!(s.dict)[1]
 popfirst!(s::OrderedSet) = popfirst!(s.dict)[1]
+
+
 
 ==(l::OrderedSet, r::OrderedSet) = (length(l) == length(r)) && (l <= r)
 <(l::OrderedSet, r::OrderedSet) = (length(l) < length(r)) && (l <= r)
@@ -90,6 +70,7 @@ function hash(s::OrderedSet, h::UInt)
     s.dict.ndel > 0 && rehash!(s.dict)
     hash(s.dict.keys, h)
 end
+
 
 # Deprecated functionality, see
 # https://github.com/JuliaCollections/DataStructures.jl/pull/180#issuecomment-400269803

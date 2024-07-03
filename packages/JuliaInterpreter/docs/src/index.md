@@ -9,14 +9,20 @@ Interpreters have a number of applications, including support for stepping debug
 
 Using this package as an interpreter is straightforward:
 
-```@repl index
-using JuliaInterpreter
+```jldoctest demo1
+julia> using JuliaInterpreter
 
-list = [1, 2, 5]
+julia> list = [1, 2, 5]
+3-element Vector{Int64}:
+ 1
+ 2
+ 5
 
-sum(list)
+julia> sum(list)
+8
 
-@interpret sum(list)
+julia> @interpret sum(list)
+8
 ```
 
 ## Breakpoints
@@ -31,8 +37,8 @@ so here we'll illustrate it without using any of these other packages.
 Let's set a conditional breakpoint, to be triggered any time one of the elements in the
 argument to `sum` is bigger than 4:
 
-```@repl index
-bp = @breakpoint sum([1, 2]) any(x->x>4, a);
+```jldoctest demo1; filter = r"in Base at .*$"
+julia> bp = @breakpoint sum([1, 2]) any(x->x>4, a);
 ```
 
 Note that in writing the condition, we used `a`, the name of the argument to the relevant
@@ -42,10 +48,17 @@ globally-available name (as used here with the `any` function).
 
 Now let's see what happens:
 
-```@repl index
-@interpret sum([1,2,3])  # no element bigger than 4, breakpoint should not trigger
+```jldoctest demo1; filter = [r"in Base at .*$", r"[^\d]\d\d\d[^\d]"]
+julia> @interpret sum([1,2,3])  # no element bigger than 4, breakpoint should not trigger
+6
 
-frame, bpref = @interpret sum([1,2,5])  # should trigger breakpoint
+julia> frame, bpref = @interpret sum([1,2,5])  # should trigger breakpoint
+(Frame for sum(a::AbstractArray; dims, kw...) in Base at reducedim.jl:873
+c 1* 873  1 ─      nothing
+  2  873  │   %2 = ($(QuoteNode(NamedTuple)))()
+  3  873  │   %3 = Base.pairs(%2)
+⋮
+a = [1, 2, 5], breakpoint(sum(a::AbstractArray; dims, kw...) in Base at reducedim.jl:873, line 873))
 ```
 
 `frame` is described in more detail on the next page; for now, suffice it to say
@@ -53,14 +66,21 @@ that the `c` in the leftmost column indicates the presence of a conditional brea
 upon entry to `sum`. `bpref` is a reference to the breakpoint of type [`BreakpointRef`](@ref).
 The breakpoint `bp` we created can be manipulated at the command line
 
-```@repl index
-disable(bp)
+```jldoctest demo1; filter = [r"in Base at .*$", r"[^\d]\d\d\d[^\d]"]
+julia> disable(bp)
 
-@interpret sum([1,2,5])
+julia> @interpret sum([1,2,5])
+8
 
-enable(bp)
+julia> enable(bp)
 
-@interpret sum([1,2,5])
+julia> @interpret sum([1,2,5])
+(Frame for sum(a::AbstractArray; dims, kw...) in Base at reducedim.jl:873
+c 1* 873  1 ─      nothing
+  2  873  │   %2 = ($(QuoteNode(NamedTuple)))()
+  3  873  │   %3 = Base.pairs(%2)
+⋮
+a = [1, 2, 5], breakpoint(sum(a::AbstractArray; dims, kw...) in Base at reducedim.jl:873, line 873))
 ```
 
 [`disable`](@ref) and [`enable`](@ref) allow you to turn breakpoints off and on without losing any
@@ -76,43 +96,76 @@ At present, note that some of this functionality requires that you be running
 It is, in addition, possible to halt execution when otherwise an error would be thrown.
 This functionality is enabled using [`break_on`](@ref) and disabled with [`break_off`](@ref):
 
-```@repl index
-function f_outer()
-    println("before error")
-    f_inner()
-    println("after error")
-end;
+```jldoctest demo1; filter=r"none:\d"
+julia> function f_outer()
+           println("before error")
+           f_inner()
+           println("after error")
+       end;
 
-f_inner() = error("inner error");
+julia> f_inner() = error("inner error");
 
-break_on(:error)
+julia> break_on(:error)
 
-fr, pc = @interpret f_outer()
+julia> fr, pc = @interpret f_outer()
+before error
+(Frame for f_outer() in Main at none:1
+  1  2  1 ─      Base.println("before error")
+  2* 3  │        f_inner()
+  3  4  │   %3 = Base.println("after error")
+  4  4  └──      return %3
+callee: f_inner() in Main at none:1, breakpoint(error(s::AbstractString) in Base at error.jl:35, line 35, ErrorException("inner error")))
 
-leaf(fr)
+julia> leaf(fr)
+Frame for error(s::AbstractString) in Base at error.jl:35
+  1  35  1 ─ %1 = ($(QuoteNode(ErrorException)))(s)
+  2* 35  │   %2 = Core.throw(%1)
+  3  35  └──      return %2
+s = "inner error"
+caller: f_inner() in Main at none:1
 
-typeof(pc)
+julia> typeof(pc)
+BreakpointRef
 
-pc.err
+julia> pc.err
+ErrorException("inner error")
 
-break_off(:error)
+julia> break_off(:error)
 
-@interpret f_outer()
+julia> @interpret f_outer()
+before error
+ERROR: inner error
+Stacktrace:
+[...]
 ```
 
 Finally, you can set breakpoints using [`@bp`](@ref):
 
-```@repl index
-function myfunction(x, y)
-    a = 1
-    b = 2
-    x > 3 && @bp
-    return a + b + x + y
-end;
+```jldoctest demo1; filter=r"none:\d"
+julia> function myfunction(x, y)
+           a = 1
+           b = 2
+           x > 3 && @bp
+           return a + b + x + y
+       end
+myfunction (generic function with 1 method)
 
-@interpret myfunction(1, 2)
+julia> @interpret myfunction(1, 2)
+6
 
-@interpret myfunction(5, 6)
+julia> @interpret myfunction(5, 6)
+(Frame for myfunction(x, y) in Main at none:1
+⋮
+  3  4  │   %3 = x > 3
+  4  4  └──      goto #3 if not %3
+b 5* 4  2 ─      nothing
+  6  4  └──      goto #3
+  7  5  3 ┄ %7 = a + b + x + y
+⋮
+x = 5
+y = 6
+b = 2
+a = 1, breakpoint(myfunction(x, y) in Main at none:1, line 4))
 ```
 
 Here the breakpoint is marked with a `b` indicating that it is an unconditional breakpoint.

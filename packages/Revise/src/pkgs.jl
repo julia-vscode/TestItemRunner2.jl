@@ -331,9 +331,6 @@ This function gets called via a callback registered with `Base.require`, at the 
 of module-loading by `using` or `import`.
 """
 function watch_package(id::PkgId)
-    # we may have switched environments, so make sure we're watching the right manifest
-    active_project_watcher()
-
     pkgdata = get(pkgdatas, id, nothing)
     pkgdata !== nothing && return pkgdata
     lock(wplock)
@@ -361,19 +358,10 @@ function has_writable_paths(pkgdata::PkgData)
     dir = basedir(pkgdata)
     isdir(dir) || return true
     haswritable = false
-    # Compatibility note:
-    # The following can be written in cd(dir) do ... end block
-    # but that would trigger Julia to crash for some corner cases.
-    # This is identified on Julia 1.7.3 + modified ubuntu 18.04, and it is
-    # verified that doesn't happen for Julia 1.9.2 on the same machine.
-    current_dir = pwd()
-    try
-        cd(dir)
+    cd(dir) do
         for file in srcfiles(pkgdata)
             haswritable |= iswritable(file)
         end
-    finally
-        cd(current_dir)
     end
     return haswritable
 end
@@ -408,11 +396,7 @@ function manifest_paths!(pkgpaths::Dict, manifest_file::String)
         for entry in entries
             id = PkgId(UUID(entry["uuid"]::String), name)
             path = Base.explicit_manifest_entry_path(manifest_file, id, entry)
-            if path isa String
-                if isfile(path)
-                    # Workaround for #802
-                    path = dirname(dirname(path))
-                end
+            if path !== nothing
                 pkgpaths[id] = path
             end
         end
@@ -497,7 +481,7 @@ end
 
 function active_project_watcher()
     mfile = manifest_file()
-    if !isnothing(mfile) && mfile ∉ watched_manifests
+    if mfile ∉ watched_manifests
         push!(watched_manifests, mfile)
         wmthunk = TaskThunk(watch_manifest, (mfile,))
         schedule(Task(wmthunk))

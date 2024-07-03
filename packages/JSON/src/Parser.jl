@@ -2,7 +2,8 @@ module Parser  # JSON
 
 using Mmap
 using ..Common
-import Parsers
+
+include("pushvector.jl")
 
 """
 Like `isspace`, but work on bytes and includes only the four whitespace
@@ -26,16 +27,17 @@ end
 # it is convenient to access MemoryParserState like a Vector{UInt8} to avoid copies
 Base.@propagate_inbounds Base.getindex(state::MemoryParserState, i::Int) = codeunit(state.utf8, i)
 Base.length(state::MemoryParserState) = sizeof(state.utf8)
+Base.unsafe_convert(::Type{Ptr{UInt8}}, state::MemoryParserState) = Base.unsafe_convert(Ptr{UInt8}, state.utf8)
 
 mutable struct StreamingParserState{T <: IO} <: ParserState
     io::T
     cur::UInt8
     used::Bool
-    utf8array::Vector{UInt8}
+    utf8array::PushVector{UInt8, Vector{UInt8}}
 end
-StreamingParserState(io::IO) = StreamingParserState(io, 0x00, true, UInt8[])
+StreamingParserState(io::IO) = StreamingParserState(io, 0x00, true, PushVector{UInt8}())
 
-struct ParserContext{DictType, IntType, AllowNanInf, NullValue} end
+struct ParserContext{DictType, IntType} end
 
 """
 Return the byte at the current position of the `ParserState`. If there is no
@@ -102,7 +104,7 @@ the advancement. If the `ParserState` is already done, then throw an error.
 
 """
 Return `true` if there is a current byte, and `false` if all bytes have been
-exhausted.
+exausted.
 """
 @inline hasmore(ps::MemoryParserState) = ps.s ≤ length(ps)
 @inline hasmore(ps::StreamingParserState) = true  # no more now ≠ no more ever
@@ -167,12 +169,11 @@ function parse_value(pc::ParserContext, ps::ParserState)
     elseif byte == ARRAY_BEGIN
         parse_array(pc, ps)
     else
-        parse_jsconstant(pc, ps)
+        parse_jsconstant(ps::ParserState)
     end
 end
 
-function parse_jsconstant(::ParserContext{<:Any,<:Any,AllowNanInf,NullValue},
-                          ps::ParserState) where {AllowNanInf,NullValue}
+function parse_jsconstant(ps::ParserState)
     c = advance!(ps)
     if c == LATIN_T      # true
         skip!(ps, LATIN_R, LATIN_U, LATIN_E)
@@ -182,13 +183,7 @@ function parse_jsconstant(::ParserContext{<:Any,<:Any,AllowNanInf,NullValue},
         false
     elseif c == LATIN_N  # null
         skip!(ps, LATIN_U, LATIN_L, LATIN_L)
-        NullValue
-    elseif AllowNanInf && c == LATIN_UPPER_N
-        skip!(ps, LATIN_A, LATIN_UPPER_N)
-        NaN
-    elseif AllowNanInf && c == LATIN_UPPER_I
-        skip!(ps, LATIN_N, LATIN_F, LATIN_I, LATIN_N, LATIN_I, LATIN_T, LATIN_Y)
-        Inf
+        nothing
     else
         _error(E_UNEXPECTED_CHAR, ps)
     end
@@ -212,7 +207,7 @@ function parse_array(pc::ParserContext, ps::ParserState)
 end
 
 
-function parse_object(pc::ParserContext{DictType,<:Real,<:Any}, ps::ParserState) where DictType
+function parse_object(pc::ParserContext{DictType, <:Real}, ps::ParserState) where DictType
     obj = DictType()
     keyT = keytype(typeof(obj))
 
@@ -316,17 +311,19 @@ end
 Parse a float from the given bytes vector, starting at `from` and ending at the
 byte before `to`. Bytes enclosed should all be ASCII characters.
 """
-float_from_bytes(bytes::MemoryParserState, from::Int, to::Int) = float_from_bytes(bytes.utf8, from, to)
-
-function float_from_bytes(bytes::Union{String, Vector{UInt8}}, from::Int, to::Int)::Union{Float64,Nothing}
-    return Parsers.tryparse(Float64, bytes isa String ? SubString(bytes, from:to) : view(bytes, from:to))
+function float_from_bytes(bytes, from::Int, to::Int)
+    # The ccall is not ideal (Base.tryparse would be better), but it actually
+    # makes an 2× difference to performance
+    hasvalue, val = ccall(:jl_try_substrtod, Tuple{Bool, Float64},
+            (Ptr{UInt8}, Csize_t, Csize_t), bytes, from - 1, to - from + 1)
+    hasvalue ? val : nothing
 end
 
 """
 Parse an integer from the given bytes vector, starting at `from` and ending at
 the byte before `to`. Bytes enclosed should all be ASCII characters.
 """
-function int_from_bytes(pc::ParserContext{<:Any,IntType,<:Any},
+function int_from_bytes(pc::ParserContext{<:Any,IntType},
                         ps::ParserState,
                         bytes,
                         from::Int,
@@ -367,21 +364,11 @@ function number_from_bytes(pc::ParserContext,
 end
 
 
-function parse_number(pc::ParserContext{<:Any,<:Any,AllowNanInf}, ps::ParserState) where AllowNanInf
+function parse_number(pc::ParserContext, ps::ParserState)
     # Determine the end of the floating point by skipping past ASCII values
     # 0-9, +, -, e, E, and .
     number = ps.utf8array
     isint = true
-    negative = false
-
-    c = current(ps)
-
-    # Parse and keep track of initial minus sign (for parsing -Infinity)
-    if AllowNanInf && c == MINUS_SIGN
-        push!(number, UInt8(c)) # save in case the next character is a number
-        negative = true
-        incr!(ps)
-    end
 
     @inbounds while hasmore(ps)
         c = current(ps)
@@ -391,10 +378,6 @@ function parse_number(pc::ParserContext{<:Any,<:Any,AllowNanInf}, ps::ParserStat
         elseif c in (PLUS_SIGN, LATIN_E, LATIN_UPPER_E, DECIMAL_POINT)
             push!(number, UInt8(c))
             isint = false
-        elseif AllowNanInf && c == LATIN_UPPER_I
-            infinity = parse_jsconstant(pc, ps)
-            resize!(number, 0)
-            return (negative ? -infinity : infinity)
         else
             break
         end
@@ -407,7 +390,6 @@ function parse_number(pc::ParserContext{<:Any,<:Any,AllowNanInf}, ps::ParserStat
     return v
 end
 
-
 unparameterize_type(x) = x # Fallback for nontypes -- functions etc
 function unparameterize_type(T::Type)
     candidate = typeintersect(T, AbstractDict{String, Any})
@@ -415,37 +397,19 @@ function unparameterize_type(T::Type)
 end
 
 # Workaround for slow dynamic dispatch for creating objects
-const DEFAULT_PARSERCONTEXT = ParserContext{Dict{String, Any}, Int64, false, nothing}()
-function _get_parsercontext(dicttype, inttype, allownan, null)
-    if dicttype == Dict{String, Any} && inttype == Int64 && !allownan
+const DEFAULT_PARSERCONTEXT = ParserContext{Dict{String, Any}, Int64}()
+function _get_parsercontext(dicttype, inttype)
+    if dicttype == Dict{String, Any} && inttype == Int64
         DEFAULT_PARSERCONTEXT
     else
-        ParserContext{unparameterize_type(dicttype), inttype, allownan, null}.instance
+        ParserContext{unparameterize_type(dicttype), inttype}.instance
     end
 end
 
-"""
-    parse(str::AbstractString;
-          dicttype::Type{T}=Dict,
-          inttype::Type{<:Real}=Int64,
-          allownan::Bool=true,
-          null=nothing) where {T<:AbstractDict}
-
-Parses the given JSON string into corresponding Julia types.
-
-Keyword arguments:
-  • dicttype: Associative type to use when parsing JSON objects (default: Dict{String, Any})
-  • inttype: Real number type to use when parsing JSON numbers that can be parsed
-             as integers (default: Int64)
-  • allownan: allow parsing of NaN, Infinity, and -Infinity (default: true)
-  • null: value to use for parsed JSON `null` values (default: `nothing`)
-"""
 function parse(str::AbstractString;
                dicttype=Dict{String,Any},
-               inttype::Type{<:Real}=Int64,
-               allownan::Bool=true,
-               null=nothing)
-    pc = _get_parsercontext(dicttype, inttype, allownan, null)
+               inttype::Type{<:Real}=Int64)
+    pc = _get_parsercontext(dicttype, inttype)
     ps = MemoryParserState(str, 1)
     v = parse_value(pc, ps)
     chomp_space!(ps)
@@ -455,60 +419,22 @@ function parse(str::AbstractString;
     v
 end
 
-"""
-    parse(io::IO;
-          dicttype::Type{T}=Dict,
-          inttype::Type{<:Real}=Int64,
-          allownan=true,
-          null=nothing) where {T<:AbstractDict}
-
-Parses JSON from the given IO stream into corresponding Julia types.
-
-Keyword arguments:
-  • dicttype: Associative type to use when parsing JSON objects (default: Dict{String, Any})
-  • inttype: Real number type to use when parsing JSON numbers that can be parsed
-             as integers (default: Int64)
-  • allownan: allow parsing of NaN, Infinity, and -Infinity (default: true)
-  • null: value to use for parsed JSON `null` values (default: `nothing`)
-"""
 function parse(io::IO;
                dicttype=Dict{String,Any},
-               inttype::Type{<:Real}=Int64,
-               allownan::Bool=true,
-               null=nothing)
-    pc = _get_parsercontext(dicttype, inttype, allownan, null)
+               inttype::Type{<:Real}=Int64)
+    pc = _get_parsercontext(dicttype, inttype)
     ps = StreamingParserState(io)
     parse_value(pc, ps)
 end
 
-"""
-    parsefile(filename::AbstractString;
-              dicttype=Dict{String, Any},
-              inttype::Type{<:Real}=Int64,
-              allownan::Bool=true,
-              null=nothing,
-              use_mmap::Bool=true)
-
-Convenience function to parse JSON from the given file into corresponding Julia types.
-
-Keyword arguments:
-  • dicttype: Associative type to use when parsing JSON objects (default: Dict{String, Any})
-  • inttype: Real number type to use when parsing JSON numbers that can be parsed
-             as integers (default: Int64)
-  • allownan: allow parsing of NaN, Infinity, and -Infinity (default: true)
-  • null: value to use for parsed JSON `null` values (default: `nothing`)
-  • use_mmap: use mmap when opening the file (default: true)
-"""
 function parsefile(filename::AbstractString;
                    dicttype=Dict{String, Any},
                    inttype::Type{<:Real}=Int64,
-                   null=nothing,
-                   allownan::Bool=true,
-                   use_mmap::Bool=true)
+                   use_mmap=true)
     sz = filesize(filename)
     open(filename) do io
         s = use_mmap ? String(Mmap.mmap(io, Vector{UInt8}, sz)) : read(io, String)
-        parse(s; dicttype=dicttype, inttype=inttype, allownan=allownan, null=null)
+        parse(s; dicttype=dicttype, inttype=inttype)
     end
 end
 

@@ -88,18 +88,10 @@ end
 
 get_source(meth::Method) = Base.uncompressed_ast(meth)
 
-@static if VERSION < v"1.10.0-DEV.873"  # julia#48766
-    function get_source(g::GeneratedFunctionStub, env, file, line)
-        b = g(env..., g.argnames...)
-        b isa CodeInfo && return b
-        return eval(b)
-    end
-else
-    function get_source(g::GeneratedFunctionStub, env, file, line::Int)
-        b = g(Base.get_world_counter(), LineNumberNode(line, file), env..., g.argnames...)
-        b isa CodeInfo && return b
-        return eval(b)
-    end
+function get_source(g::GeneratedFunctionStub, env)
+    b = g(env..., g.argnames...)
+    b isa CodeInfo && return b
+    return eval(b)
 end
 
 """
@@ -116,15 +108,17 @@ keyword-sorter function for `fcall`.
 # Example
 
 ```jldoctest
-julia> mymethod(x) = 1;
+julia> mymethod(x) = 1
+mymethod (generic function with 1 method)
 
-julia> mymethod(x, y; verbose=false) = nothing;
+julia> mymethod(x, y; verbose=false) = nothing
+mymethod (generic function with 2 methods)
 
 julia> JuliaInterpreter.prepare_args(mymethod, [mymethod, 15], ())
 (mymethod, Any[mymethod, 15])
 
 julia> JuliaInterpreter.prepare_args(mymethod, [mymethod, 1, 2], [:verbose=>true])
-(Core.kwcall, Any[Core.kwcall, (verbose = true,), mymethod, 1, 2])
+(var"#mymethod##kw"(), Any[var"#mymethod##kw"(), (verbose = true,), mymethod, 1, 2])
 ```
 """
 function prepare_args(@nospecialize(f), allargs, kwargs)
@@ -154,12 +148,12 @@ function prepare_framecode(method::Method, @nospecialize(argtypes); enter_genera
             # If we're stepping into a staged function, we need to use
             # the specialization, rather than stepping through the
             # unspecialized method.
-            code = get_staged(Core.Compiler.specialize_method(method, argtypes, lenv))
+            code = Core.Compiler.get_staged(Core.Compiler.specialize_method(method, argtypes, lenv))
             code === nothing && return nothing
             generator = false
         else
             if is_generated(method)
-                code = get_source(method.generator, lenv, method.file, Int(method.line))
+                code = get_source(method.generator, lenv)
                 generator = true
             else
                 code = get_source(method)
@@ -172,7 +166,7 @@ function prepare_framecode(method::Method, @nospecialize(argtypes); enter_genera
         if (!isempty(lenv) && (hasarg(isidentical(:llvmcall), code.code) ||
                                hasarg(isidentical(Base.llvmcall), code.code) ||
                                hasarg(a->is_global_ref(a, Base, :llvmcall), code.code))) ||
-                               hasarg(isidentical(:iolock_begin), code.code)
+                hasarg(isidentical(:iolock_begin), code.code)
             return Compiled()
         end
         framecode = FrameCode(method, code; generator=generator)
@@ -213,7 +207,8 @@ this will be the types of `allargs`);
 # Example
 
 ```jldoctest
-julia> mymethod(x::Vector{T}) where T = 1;
+julia> mymethod(x::Vector{T}) where T = 1
+mymethod (generic function with 1 method)
 
 julia> framecode, frameargs, lenv, argtypes = JuliaInterpreter.prepare_call(mymethod, [mymethod, [1.0,2.0]]);
 
@@ -269,7 +264,7 @@ function prepare_framedata(framecode, argvals::Vector{Any}, lenv::SimpleVector=e
     if length(junk_framedata) > 0
         olddata = pop!(junk_framedata)
         locals, ssavalues, sparams = olddata.locals, olddata.ssavalues, olddata.sparams
-        exception_frames, current_scopes, last_reference = olddata.exception_frames, olddata.current_scopes, olddata.last_reference
+        exception_frames, last_reference = olddata.exception_frames, olddata.last_reference
         last_exception = olddata.last_exception
         callargs = olddata.callargs
         resize!(locals, ns)
@@ -279,7 +274,6 @@ function prepare_framedata(framecode, argvals::Vector{Any}, lenv::SimpleVector=e
         # for check_isdefined to work properly, we need sparams to start out unassigned
         resize!(sparams, 0)
         empty!(exception_frames)
-        empty!(current_scopes)
         resize!(last_reference, ns)
         last_exception[] = _INACTIVE_EXCEPTION.instance
     else
@@ -287,7 +281,6 @@ function prepare_framedata(framecode, argvals::Vector{Any}, lenv::SimpleVector=e
         ssavalues = Vector{Any}(undef, ng)
         sparams = Vector{Any}(undef, 0)
         exception_frames = Int[]
-        current_scopes = Scope[]
         last_reference = Vector{Int}(undef, ns)
         callargs = Any[]
         last_exception = Ref{Any}(_INACTIVE_EXCEPTION.instance)
@@ -316,8 +309,7 @@ function prepare_framedata(framecode, argvals::Vector{Any}, lenv::SimpleVector=e
         isa(T, TypeVar) && continue  # only fill concrete types
         sparams[i] = T
     end
-    return FrameData(locals, ssavalues, sparams, exception_frames, current_scopes,
-                     last_exception, caller_will_catch_err, last_reference, callargs)
+    FrameData(locals, ssavalues, sparams, exception_frames, last_exception, caller_will_catch_err, last_reference, callargs)
 end
 
 """
@@ -334,7 +326,6 @@ end
 function prepare_frame_caller(caller::Frame, framecode::FrameCode, args::Vector{Any}, lenv::SimpleVector)
     caller_will_catch_err = !isempty(caller.framedata.exception_frames) || caller.framedata.caller_will_catch_err
     caller.callee = frame = prepare_frame(framecode, args, lenv, caller_will_catch_err)
-    copy!(frame.framedata.current_scopes, caller.framedata.current_scopes)
     frame.caller = caller
     return frame
 end
@@ -342,17 +333,14 @@ end
 """
     ExprSplitter(mod::Module, ex::Expr; lnn=nothing)
 
-Given a module `mod` and a top-level expression `ex` in `mod`, create an iterable that returns
-individual expressions together with their module of evaluation.
+Create an iterable that returns individual expressions together with their module of evaluation.
 Optionally supply an initial `LineNumberNode` `lnn`.
 
 # Example
 
-In a fresh session,
-
 ```
 julia> expr = quote
-           public_fn(x::Integer) = true
+           public(x::Integer) = true
            module Private
            private(y::String) = false
            end
@@ -365,7 +353,7 @@ julia> for (mod, ex) in ExprSplitter(Main, expr)
 mod = Main
 ex = quote
     #= REPL[7]:2 =#
-    public_fn(x::Integer) = begin
+    public(x::Integer) = begin
             #= REPL[7]:2 =#
             true
         end
@@ -382,13 +370,13 @@ mod = Main
 ex = :($(Expr(:toplevel, :(#= REPL[7]:6 =#), :(const threshold = 0.1))))
 ```
 
-`ExprSplitter` created `Main.Private` was created for you so that its internal expressions could be evaluated.
+Note that `Main.Private` was created for you so that its internal expressions could be evaluated.
 `ExprSplitter` will check to see whether the module already exists and if so return it rather than
 try to create a new module with the same name.
 
 In general each returned expression is a block with two parts: a `LineNumberNode` followed by a single expression.
 In some cases the returned expression may be `:toplevel`, as shown in the `const` declaration,
-but otherwise it will preserve its parent's `head` (e.g., `expr.head`).
+but otherwise it will be a `:block`.
 
 # World age, frame creation, and evaluation
 
@@ -415,7 +403,7 @@ julia> for (mod, ex) in ExprSplitter(Main, expr)
 julia> threshold
 0.1
 
-julia> public_fn(3)
+julia> public(3)
 true
 ```
 
@@ -448,7 +436,7 @@ function push_modex!(iter::ExprSplitter, mod::Module, ex::Expr)
         modifies_scope = false
         if ex.head === :block
             for a in ex.args
-                if isa(a, Expr) && a.head === :local
+                if isa(a, Expr) && a.head ∈ (:local, :global)
                     modifies_scope = true
                     break
                 end
@@ -592,15 +580,17 @@ would be created by the generator.
 # Example
 
 ```jldoctest
-julia> mymethod(x) = x+1;
+julia> mymethod(x) = x+1
+mymethod (generic function with 1 method)
 
 julia> JuliaInterpreter.enter_call_expr(:(\$mymethod(1)))
-Frame for mymethod(x) @ Main none:1
+Frame for mymethod(x) in Main at none:1
   1* 1  1 ─ %1 = x + 1
   2  1  └──      return %1
 x = 1
 
-julia> mymethod(x::Vector{T}) where T = 1;
+julia> mymethod(x::Vector{T}) where T = 1
+mymethod (generic function with 2 methods)
 
 julia> a = [1.0, 2.0]
 2-element Vector{Float64}:
@@ -608,7 +598,7 @@ julia> a = [1.0, 2.0]
  2.0
 
 julia> JuliaInterpreter.enter_call_expr(:(\$mymethod(\$a)))
-Frame for mymethod(x::Vector{T}) where T @ Main none:1
+Frame for mymethod(x::Vector{T}) where T in Main at none:1
   1* 1  1 ─     return 1
 x = [1.0, 2.0]
 T = Float64
@@ -633,18 +623,20 @@ Build a `Frame` ready to execute `f` with the specified positional and keyword a
 # Example
 
 ```jldoctest
-julia> mymethod(x) = x+1;
+julia> mymethod(x) = x+1
+mymethod (generic function with 1 method)
 
 julia> JuliaInterpreter.enter_call(mymethod, 1)
-Frame for mymethod(x) @ Main none:1
+Frame for mymethod(x) in Main at none:1
   1* 1  1 ─ %1 = x + 1
   2  1  └──      return %1
 x = 1
 
-julia> mymethod(x::Vector{T}) where T = 1;
+julia> mymethod(x::Vector{T}) where T = 1
+mymethod (generic function with 2 methods)
 
 julia> JuliaInterpreter.enter_call(mymethod, [1.0, 2.0])
-Frame for mymethod(x::Vector{T}) where T @ Main none:1
+Frame for mymethod(x::Vector{T}) where T in Main at none:1
   1* 1  1 ─     return 1
 x = [1.0, 2.0]
 T = Float64
@@ -729,7 +721,10 @@ Evaluate `f` on the specified arguments using the interpreter.
 # Example
 
 ```jldoctest
-julia> a = [1, 7];
+julia> a = [1, 7]
+2-element Vector{Int64}:
+ 1
+ 7
 
 julia> sum(a)
 8

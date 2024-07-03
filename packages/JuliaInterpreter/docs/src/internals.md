@@ -146,22 +146,20 @@ Sometimes you might have a whole sequence of expressions you want to run.
 In such cases, your first thought should be to construct the `Frame` manually.
 Here's a demonstration:
 
-```@setup internals
-using JuliaInterpreter;
-JuliaInterpreter.clear_caches()
-```
-
-```@repl internals
+```jldoctest; setup=(using JuliaInterpreter; JuliaInterpreter.clear_caches())
 using Test
 
 ex = quote
     x, y = 1, 2
     @test x + y == 3
-end;
+end
 
-frame = Frame(Main, ex);
-
+frame = Frame(Main, ex)
 JuliaInterpreter.finish_and_return!(frame)
+
+# output
+
+Test Passed
 ```
 
 ## Toplevel code and world age

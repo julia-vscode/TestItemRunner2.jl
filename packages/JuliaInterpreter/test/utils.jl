@@ -31,18 +31,13 @@ end
 
 ## For running interpreter frames under resource limitations
 
-if isdefined(Base.IRShow, :LineInfoNode)
-struct Aborted    # for signaling that some statement or test blocks were interrupted
-    at::Base.IRShow.LineInfoNode
-end
-else
 struct Aborted    # for signaling that some statement or test blocks were interrupted
     at::Core.LineInfoNode
 end
-end
 
 function Aborted(frame::Frame, pc)
-    lineidx = JuliaInterpreter.codelocs(frame, pc)
+    src = frame.framecode.src
+    lineidx = src.codelocs[pc]
     lineinfo = JuliaInterpreter.linetable(frame, lineidx; macro_caller=true)
     return Aborted(lineinfo)
 end

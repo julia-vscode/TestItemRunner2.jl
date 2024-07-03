@@ -40,9 +40,6 @@ function parse_source!(mod_exprs_sigs::ModuleExprsSigs, src::AbstractString, fil
     ex = Base.parse_input_line(src; filename=filename)
     ex === nothing && return mod_exprs_sigs
     if isexpr(ex, :error) || isexpr(ex, :incomplete)
-        if Base.VERSION >= v"1.10"
-            eval(ex)   # this will throw, so the statements below will not execute
-        end
         prevex, pos = first_bad_position(src)
         ln = count(isequal('\n'), SubString(src, 1, min(pos, length(src)))) + 1
         throw(LoadError(filename, ln, ex.args[1]))
@@ -72,7 +69,7 @@ function process_source!(mod_exprs_sigs::ModuleExprsSigs, ex, filename, mod::Mod
                 if isa(a, LineNumberNode)
                     lnn = a
                 else
-                    pushex!(exprs_sigs, Expr(:toplevel, lnn, a))
+                    pushex!(exprs_sigs, Expr(:block, lnn, a))
                 end
             end
         else
@@ -82,15 +79,13 @@ function process_source!(mod_exprs_sigs::ModuleExprsSigs, ex, filename, mod::Mod
     return mod_exprs_sigs
 end
 
-if Base.VERSION < v"1.10"
-    function first_bad_position(str)
-        ex, pos, n = nothing, 1, length(str)
-        while pos < n
-            ex, pos = Meta.parse(str, pos; greedy=true, raise=false)
-            if isexpr(ex, :error) || isexpr(ex, :incomplete)
-                return ex, pos
-            end
+function first_bad_position(str)
+    ex, pos, n = nothing, 1, length(str)
+    while pos < n
+        ex, pos = Meta.parse(str, pos; greedy=true, raise=false)
+        if isexpr(ex, :error) || isexpr(ex, :incomplete)
+            return ex, pos
         end
-        error("expected an error, finished without one")
     end
+    error("expected an error, finished without one")
 end

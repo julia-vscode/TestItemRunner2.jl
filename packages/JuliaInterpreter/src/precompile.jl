@@ -1,12 +1,12 @@
 module var"#Internal"
-public_fn(x::String) = false
+public(x::String) = false
 end
 
 function _precompile_()
     ccall(:jl_generating_output, Cint, ()) == 1 || return nothing
     @interpret sum(rand(10))
     expr = quote
-        public_fn(x::Integer) = true
+        public(x::Integer) = true
         module Private
             private(y::String) = false
         end

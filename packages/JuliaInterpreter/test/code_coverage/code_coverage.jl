@@ -24,22 +24,22 @@ let
     local pid
     try
         @testset "code coverage" begin
-            io = Base.PipeEndpoint()
+            io = IOBuffer()
             filepath = normpath(@__DIR__, "coverage_example.jl")
             cmd = `$(Base.julia_cmd()) --startup=no --project=$(dirname(dirname(@__DIR__)))
                 --code-coverage=user $filepath`
-            p = run(cmd, devnull, io, stderr; wait=false)
+            p = run(pipeline(cmd; stdout=io); wait=false)
             pid = Libc.getpid(p)
-            @test read(io, String) == "1 2 fizz 4 "
-            @test success(p)
+            wait(p)
+            out = String(take!(io))
+            @test out == "1 2 fizz 4 "
 
             dir, _, files = first(walkdir(@__DIR__))
             i = findfirst(contains(r"coverage_example\.jl\.\d+\.cov"), files)
             i === nothing && error("no coverage files found in $dir: $files")
             cov_file = joinpath(dir, files[i])
             cov_data = read(cov_file, String)
-            expected = "coverage_example.jl.cov"
-            expected = read(joinpath(dir, expected), String)
+            expected = read(joinpath(dir, "coverage_example.jl.cov"), String)
             if Sys.iswindows()
                 cov_data = replace(cov_data, "\r\n" => "\n")
                 expected = replace(cov_data, "\r\n" => "\n")

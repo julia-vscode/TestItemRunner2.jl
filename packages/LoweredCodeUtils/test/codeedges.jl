@@ -1,5 +1,3 @@
-module codeedges
-
 using LoweredCodeUtils
 using LoweredCodeUtils.JuliaInterpreter
 using LoweredCodeUtils: callee_matches, istypedef, exclude_named_typedefs
@@ -65,7 +63,7 @@ module ModSelective end
     # Check that the result of direct evaluation agrees with selective evaluation
     Core.eval(ModEval, ex)
     isrequired = lines_required(:x, src, edges)
-    # theere is too much diversity in lowering across Julia versions to make it useful to test `sum(isrequired)`
+    @test sum(isrequired) == 1 + isdefined(Core, :get_binding_type) * 3  # get_binding_type + convert + typeassert
     selective_eval_fromstart!(frame, isrequired)
     @test ModSelective.x === ModEval.x
     @test allmissing(ModSelective, (:y, :z, :a, :b, :k))
@@ -97,13 +95,12 @@ module ModSelective end
             y2 = 7
             a2 = 2
         end
-        a2
     end
     frame = Frame(ModSelective, ex)
     src = frame.framecode.src
     edges = CodeEdges(src)
     isrequired = lines_required(:a2, src, edges)
-    selective_eval_fromstart!(frame, isrequired, #=istoplevel=#true)
+    selective_eval_fromstart!(frame, isrequired)
     Core.eval(ModEval, ex)
     @test ModSelective.a2 === ModEval.a2 == 1
     @test allmissing(ModSelective, (:z2, :x2, :y2))
@@ -128,23 +125,6 @@ module ModSelective end
     Core.eval(ModEval, ex)
     @test ModSelective.a3 === ModEval.a3 == 2
     @test allmissing(ModSelective, (:z3, :x3, :y3))
-    # ensure we mark all needed control-flow for loops and conditionals,
-    # and don't fall-through incorrectly
-    ex = quote
-        valcf = 0
-        for i = 1:5
-            global valcf
-            if valcf < 4
-                valcf += 1
-            end
-        end
-    end
-    frame = Frame(ModSelective, ex)
-    src = frame.framecode.src
-    edges = CodeEdges(src)
-    isrequired = lines_required(:valcf, src, edges)
-    selective_eval_fromstart!(frame, isrequired)
-    @test ModSelective.valcf == 4
 
     ex = quote
         if Sys.iswindows()
@@ -160,7 +140,7 @@ module ModSelective end
     src = frame.framecode.src
     edges = CodeEdges(src)
     isrequired = lines_required(:c_os, src, edges)
-    @test sum(isrequired) >= length(isrequired) - 3
+    @test sum(isrequired) >= length(isrequired) - 2
     selective_eval_fromstart!(frame, isrequired)
     Core.eval(ModEval, ex)
     @test ModSelective.c_os === ModEval.c_os == Sys.iswindows()
@@ -281,12 +261,8 @@ module ModSelective end
     src = frame.framecode.src
     edges = CodeEdges(src)
     isrequired = fill(false, length(src.code))
-    j = length(src.code) - 1
-    if !Meta.isexpr(src.code[end-1], :method, 3)
-        j -= 1
-    end
-    @assert Meta.isexpr(src.code[j], :method, 3)
-    isrequired[j] = true
+    @assert Meta.isexpr(src.code[end-1], :method, 3)
+    isrequired[end-1] = true
     lines_required!(isrequired, src, edges)
     selective_eval_fromstart!(frame, isrequired, true)
     @test ModSelective.max_values(Int16) === 65536
@@ -316,7 +292,7 @@ module ModSelective end
     # https://github.com/timholy/Revise.jl/issues/538
     thk = Meta.lower(ModEval, quote
         try
-            global function revise538(x::Float32)
+            global function v1(x::Float32)
                 println("F32")
             end
         catch e
@@ -325,9 +301,9 @@ module ModSelective end
     end)
     src = thk.args[1]
     edges = CodeEdges(src)
-    lr = lines_required(:revise538, src, edges)
-    selective_eval_fromstart!(Frame(ModEval, src), lr, #=istoplevel=#true)
-    @test isdefined(ModEval, :revise538) && length(methods(ModEval.revise538, (Float32,))) == 1
+    lr = lines_required(:v1, src, edges)
+    idx = findfirst(stmt->Meta.isexpr(stmt, :leave), src.code)
+    @test lr[idx]
 
     # https://github.com/timholy/Revise.jl/issues/599
     thk = Meta.lower(Main, quote
@@ -380,12 +356,9 @@ module ModSelective end
         str = String(take!(io))
         @test occursin(r"slot 1:\n  preds: ssas: \[\d+, \d+\], slots: ∅, names: ∅;\n  succs: ssas: \[\d+, \d+, \d+\], slots: ∅, names: ∅;\n  assign @: \[\d+, \d+\]", str)
         @test occursin(r"succs: ssas: ∅, slots: \[\d+\], names: ∅;", str)
-        # Some of these differ due to changes by Julia version in global var inference
-        if Base.VERSION < v"1.10"
-            @test occursin(r"s:\n  preds: ssas: \[\d+\], slots: ∅, names: ∅;\n  succs: ssas: \[\d+, \d+, \d+\], slots: ∅, names: ∅;\n  assign @: \[\d, \d+\]", str) ||
-                  occursin(r"s:\n  preds: ssas: \[\d+, \d+\], slots: ∅, names: ∅;\n  succs: ssas: \[\d+, \d+, \d+\], slots: ∅, names: ∅;\n  assign @: \[\d, \d+\]", str)   # with global var inference
-        end
-        if Base.VERSION < v"1.8"
+        @test occursin(r"s:\n  preds: ssas: \[\d+\], slots: ∅, names: ∅;\n  succs: ssas: \[\d+, \d+, \d+\], slots: ∅, names: ∅;\n  assign @: \[\d, \d+\]", str) ||
+              occursin(r"s:\n  preds: ssas: \[\d+, \d+\], slots: ∅, names: ∅;\n  succs: ssas: \[\d+, \d+, \d+\], slots: ∅, names: ∅;\n  assign @: \[\d, \d+\]", str)   # with global var inference
+        if Base.VERSION < v"1.8" # changed by global var inference
             @test occursin(r"\d+ preds: ssas: \[\d+\], slots: ∅, names: \[:s\];\n\d+ succs: ssas: ∅, slots: ∅, names: \[:s\];", str)
         end
         LoweredCodeUtils.print_with_code(io, src, cl)
@@ -404,10 +377,8 @@ module ModSelective end
         edges = CodeEdges(src)
         show(io, edges)
         str = String(take!(io))
-        if Base.VERSION < v"1.10"
-            @test occursin(r"s: assigned on \[\d, \d+\], depends on \[\d+\], and used by \[\d+, \d+, \d+\]", str) ||
-                  occursin(r"s: assigned on \[\d, \d+\], depends on \[\d+, \d+\], and used by \[\d+, \d+, \d+\]", str)   # global var inference
-        end
+        @test occursin(r"s: assigned on \[\d, \d+\], depends on \[\d+\], and used by \[\d+, \d+, \d+\]", str) ||
+              occursin(r"s: assigned on \[\d, \d+\], depends on \[\d+, \d+\], and used by \[\d+, \d+, \d+\]", str)   # global var inference
         if Base.VERSION < v"1.9"
             @test (count(occursin("statement $i depends on [1, $(i-1), $(i+1)] and is used by [1, $(i+1)]", str) for i = 1:length(src.code)) == 1) ||
                   (count(occursin("statement $i depends on [4, $(i-1), $(i+4)] and is used by [$(i+2)]", str) for i = 1:length(src.code)) == 1)
@@ -415,10 +386,8 @@ module ModSelective end
         LoweredCodeUtils.print_with_code(io, src, edges)
         str = String(take!(io))
         if isdefined(Base.IRShow, :show_ir_stmt)
-            if Base.VERSION < v"1.10"
-                @test occursin(r"s: assigned on \[\d, \d+\], depends on \[\d+\], and used by \[\d+, \d+, \d+\]", str) ||
-                      occursin(r"s: assigned on \[\d, \d+\], depends on \[\d+, \d+\], and used by \[\d+, \d+, \d+\]", str)
-            end
+            @test occursin(r"s: assigned on \[\d, \d+\], depends on \[\d+\], and used by \[\d+, \d+, \d+\]", str) ||
+                  occursin(r"s: assigned on \[\d, \d+\], depends on \[\d+, \d+\], and used by \[\d+, \d+, \d+\]", str)
             if Base.VERSION < v"1.9"
                 @test (count(occursin("preds: [1, $(i-1), $(i+1)], succs: [1, $(i+1)]", str) for i = 1:length(src.code)) == 1) ||
                       (count(occursin("preds: [4, $(i-1), $(i+4)], succs: [$(i+2)]", str) for i = 1:length(src.code)) == 1)   # global var inference
@@ -432,10 +401,8 @@ module ModSelective end
         LoweredCodeUtils.print_with_code(io, frame, edges)
         str = String(take!(io))
         if isdefined(Base.IRShow, :show_ir_stmt)
-            if Base.VERSION < v"1.10"
-                @test occursin(r"s: assigned on \[\d, \d+\], depends on \[\d+\], and used by \[\d+, \d+, \d+\]", str) ||
-                      occursin(r"s: assigned on \[\d, \d+\], depends on \[\d, \d+\], and used by \[\d+, \d+, \d+\]", str)   # global var inference
-            end
+            @test occursin(r"s: assigned on \[\d, \d+\], depends on \[\d+\], and used by \[\d+, \d+, \d+\]", str) ||
+                  occursin(r"s: assigned on \[\d, \d+\], depends on \[\d, \d+\], and used by \[\d+, \d+, \d+\]", str)   # global var inference
             if Base.VERSION < v"1.9"
                 @test (count(occursin("preds: [1, $(i-1), $(i+1)], succs: [1, $(i+1)]", str) for i = 1:length(src.code)) == 1) ||
                       (count(occursin("preds: [4, $(i-1), $(i+4)], succs: [$(i+2)]", str) for i = 1:length(src.code)) == 1)  # global var inference
@@ -443,21 +410,6 @@ module ModSelective end
         else
             @test occursin("No IR statement printer", str)
         end
-
-        # display slot names
-        ex = :(let
-            s = 0.0
-            for i = 1:5
-                s += rand()
-            end
-            return s
-        end)
-        lwr = Meta.lower(Main, ex)
-        src = lwr.args[1]
-        LoweredCodeUtils.print_with_code(io, src, trues(length(src.code)))
-        str = String(take!(io))
-        @test count("s = ", str) == 2
-        @test count("i = ", str) == 1
     end
 end
 
@@ -472,7 +424,7 @@ end
 
         isrq = lines_required!(istypedef.(stmts), src, edges)
         frame = Frame(m, src)
-        selective_eval_fromstart!(frame, isrq, #=toplevel=#true)
+        selective_eval_fromstart!(frame, isrq, #= toplevel =# true)
 
         for def in defs; @test isdefined(m, def); end
         for undef in undefs; @test !isdefined(m, undef); end
@@ -541,5 +493,3 @@ end
         check_toplevel_definition_interprete(ex, defs, undefs)
     end
 end
-
-end # module codeedges

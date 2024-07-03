@@ -3,7 +3,6 @@ using OrderedCollections, Test
 @testset "OrderedDict" begin
 
     @testset "Constructors" begin
-        @test isa(@inferred(OrderedDict{Int,Float64}(zeros(Int,16), Vector{Int}(), Vector{Float64}(), 0, 0, false)), OrderedDict{Int,Float64})
         @test isa(@inferred(OrderedDict()), OrderedDict{Any,Any})
         @test isa(@inferred(OrderedDict([(1,2.0)])), OrderedDict{Int,Float64})
         @test isa(@inferred(OrderedDict([("a",1),("b",2)])), OrderedDict{String,Int})
@@ -456,22 +455,10 @@ using OrderedCollections, Test
     end
 
     @testset "ordered access" begin
-        od = OrderedDict(:a=>1, :b=>2, :c=>3)
+        od = OrderedDict(:a=>1, :b=>2, :c=>3)  
         @test popfirst!(od) == (:a => 1)
         @test :a ∉ keys(od)
         @test pop!(od) == (:c => 3)
         @test :c ∉ keys(od)
-    end
-
-    @testset "lazy reverse iteration" begin
-        ks = collect('a':'z')
-        vs = collect(0:25)
-        od   = OrderedDict(k=>v for (k,v) in zip(ks, vs))
-        pass = true
-        for (n,(k,v)) in enumerate(Iterators.reverse(od))
-            pass &= reverse(ks)[n] == k
-            pass &= reverse(vs)[n] == v
-        end
-        @test pass
     end
 end # @testset OrderedDict

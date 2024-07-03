@@ -195,10 +195,10 @@ struct Squarer end
     # Breakpoint display
     io = IOBuffer()
     frame = JuliaInterpreter.enter_call(loop_radius2, 2)
-    @static if VERSION < v"1.9.0-DEV.846" # https://github.com/JuliaLang/julia/pull/45069
+    if VERSION < v"1.9.0-DEV.846" # https://github.com/JuliaLang/julia/pull/45069
         LOC = " in $(@__MODULE__) at $(@__FILE__)"
     else
-        LOC = " @ $(@__MODULE__) $(contractuser(@__FILE__))"
+        LOC = "\n     @ $(@__MODULE__) $(contractuser(@__FILE__))"
     end
     bp = JuliaInterpreter.BreakpointRef(frame.framecode, 1)
     @test repr(bp) == "breakpoint(loop_radius2(n)$LOC:$(3-Δ), line 3)"
@@ -219,7 +219,7 @@ struct Squarer end
     end
     fr, bp = @interpret f_outer_bp(3)
     @test leaf(fr).framecode.scope.name === :g_inner_bp
-    @test bp.stmtidx == (@static VERSION >= v"1.11-" ? 4 : 3)
+    @test bp.stmtidx == 3
 
     # Breakpoints on types
     remove()
@@ -520,7 +520,7 @@ end
         return 2
     end
     frame = JuliaInterpreter.enter_call(f_macro)
-    file_logging = String(only(methods(var"@info")).file)
+    file_logging = "logging.jl"
     line_logging = 0
     for entry in frame.framecode.src.linetable
         if entry.file === Symbol(file_logging)
@@ -534,7 +534,7 @@ end
         @test bp isa BreakpointRef
         file, ln = JuliaInterpreter.whereis(frame)
         @test ln == line_logging
-        @test basename(file) == basename(file_logging)
+        @test basename(file) == file_logging
         bp = JuliaInterpreter.finish_stack!(frame)
         @test bp isa BreakpointRef
         frame = leaf(frame)

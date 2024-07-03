@@ -15,7 +15,7 @@ using Base.CoreLogging: Debug,Info
 using Revise.CodeTracking: line_is_decl
 
 # In addition to using this for the "More arg-modifying macros" test below,
-# this package is used on Travis to test what happens when you have multiple
+# this package is used on CI to test what happens when you have multiple
 # *.ji files for the package.
 using EponymTuples
 
@@ -41,6 +41,12 @@ macro addint(ex)
     :($(esc(ex))::$(esc(Int)))
 end
 
+macro empty_function(name)
+    return esc(quote
+        function $name end
+    end)
+end
+
 # The following two submodules are for testing #199
 module A
 f(x::Int) = 1
@@ -60,7 +66,7 @@ end
 
 sig_type_exprs(ex) = Revise.sig_type_exprs(Main, ex)   # just for testing purposes
 
-# accomodate changes in Dict printing w/ Julia version
+# accommodate changes in Dict printing w/ Julia version
 const pair_op_compact = let io = IOBuffer()
     print(IOContext(io, :compact=>true), Dict(1=>2))
     String(take!(io))[7:end-2]
@@ -117,7 +123,8 @@ const issue639report = []
 
     do_test("Parse errors") && @testset "Parse errors" begin
         md = Revise.ModuleExprsSigs(Main)
-        @test_throws LoadError Revise.parse_source!(md, """
+        errtype = Base.VERSION < v"1.10" ? LoadError : Base.Meta.ParseError
+        @test_throws errtype Revise.parse_source!(md, """
             begin # this block should parse correctly, cf. issue #109
 
             end
@@ -140,9 +147,13 @@ const issue639report = []
         try
             includet(file)
         catch err
-            @test isa(err, LoadError)
-            @test err.file == file
-            @test endswith(err.error, "requires end")
+            @test isa(err, errtype)
+            if  Base.VERSION < v"1.10"
+                @test err.file == file
+                @test endswith(err.error, "requires end")
+            else
+                @test occursin("Expected `end`", err.msg)
+            end
         end
     end
 
@@ -680,6 +691,32 @@ const issue639report = []
         rm_precompile("A339")
         rm_precompile("B339")
 
+        # Combining `include` with empty functions (issue #758)
+        write(joinpath(testdir, "Issue758.jl"), """
+            module Issue758
+            global gvar = true
+            function f end
+            include("Issue758helperfile.jl")
+            end
+            """)
+        write(joinpath(testdir, "Issue758helperfile.jl"), "")
+        sleep(mtimedelay)
+        using Issue758
+        sleep(mtimedelay)
+        @test_throws MethodError Issue758.f()
+        sleep(mtimedelay)
+        write(joinpath(testdir, "Issue758.jl"), """
+            module Issue758
+            global gvar = true
+            function f end
+            f() = 1
+            include("Issue758helperfile.jl")
+            end
+            """)
+        yry()
+        @test Issue758.f() == 1
+        rm_precompile("Issue758")
+
         pop!(LOAD_PATH)
     end
 
@@ -1058,7 +1095,7 @@ const issue639report = []
         @test get_docstring(ds) == "f"
         @test ChangeDocstring.g() == 1
         ds = @doc(ChangeDocstring.g)
-        @test get_docstring(ds) == "No documentation found."
+        @test get_docstring(ds) in ("No documentation found.", "No documentation found for private symbol.")
         # Ordinary route
         write(joinpath(dn, "ChangeDocstring.jl"), """
             module ChangeDocstring
@@ -1098,7 +1135,7 @@ const issue639report = []
         sleep(mtimedelay)
         @test FirstDocstring.g() == 1
         ds = @doc(FirstDocstring.g)
-        @test get_docstring(ds) == "No documentation found."
+        @test get_docstring(ds) in ("No documentation found.", "No documentation found for private symbol.")
         write(joinpath(dn, "FirstDocstring.jl"), """
             module FirstDocstring
             "g" g() = 1
@@ -1110,6 +1147,23 @@ const issue639report = []
 
         rm_precompile("FirstDocstring")
         pop!(LOAD_PATH)
+    end
+
+    do_test("doc expr signature") && @testset "Docstring attached to signatures" begin
+        md = Revise.ModuleExprsSigs(Main)
+        Revise.parse_source!(md, """
+            module DocstringSigsOnly
+            function f end
+            "basecase" f(x)
+            "basecase with type" f(x::Int)
+            "basecase no varname" f(::Float64)
+            "where" f(x::T) where T <: Int8
+            "where no varname" f(::T) where T <: String
+            end
+            """, "test2", Main)
+        # Simply test that the "bodies" of the doc exprs are not included as
+        # standalone expressions.
+        @test length(md[Main.DocstringSigsOnly]) == 6 # 1 func + 5 doc exprs
     end
 
     do_test("Undef in docstrings") && @testset "Undef in docstrings" begin
@@ -1361,6 +1415,20 @@ const issue639report = []
         @test MacroLineNos568.my_fun() == 30
         rm_precompile("MacroLineNos568")
 
+        # Macros that create empty functions (another macro *execution* bug, issue #792)
+        file = tempname()
+        write(file, "@empty_function issue792f1\n")
+        sleep(mtimedelay)
+        includet(ReviseTestPrivate, file)
+        sleep(mtimedelay)
+        @test isempty(methods(ReviseTestPrivate.issue792f1))
+        open(file, "a") do f
+            println(f, "@empty_function issue792f2")
+        end
+        yry()
+        @test isempty(methods(ReviseTestPrivate.issue792f2))
+        rm(file)
+
         pop!(LOAD_PATH)
     end
 
@@ -1564,6 +1632,45 @@ const issue639report = []
         @test Submodules.f() == 1
         @test Submodules.Sub.g() == 2
         rm_precompile("Submodules")
+        pop!(LOAD_PATH)
+    end
+
+    do_test("Submodule in same file (#718)") && @testset "Submodule in same file (#718)" begin
+        testdir = newtestdir()
+        dn = joinpath(testdir, "TestPkg718", "src")
+        mkpath(dn)
+        write(joinpath(dn, "TestPkg718.jl"), """
+            module TestPkg718
+
+            module TestModule718
+                export _VARIABLE_UNASSIGNED
+                global _VARIABLE_UNASSIGNED = -84.0
+            end
+
+            using .TestModule718
+
+            end
+            """)
+        sleep(mtimedelay)
+        @eval using TestPkg718
+        sleep(mtimedelay)
+        @test TestPkg718._VARIABLE_UNASSIGNED == -84.0
+        write(joinpath(dn, "TestPkg718.jl"), """
+            module TestPkg718
+
+            module TestModule718
+                export _VARIABLE_UNASSIGNED
+                global _VARIABLE_UNASSIGNED = -83.0
+            end
+
+            using .TestModule718
+
+            end
+            """)
+        yry()
+        @test TestPkg718._VARIABLE_UNASSIGNED == -83.0
+
+        rm_precompile("TestPkg718")
         pop!(LOAD_PATH)
     end
 
@@ -1962,7 +2069,9 @@ const issue639report = []
             if ErrorType === LoadError
                 @test exc.file == fn
                 @test exc.line == line
-                @test occursin(msg, exc.error)
+                @test occursin(msg, errmsg(exc.error))
+            elseif ErrorType === Base.Meta.ParseError
+                @test occursin(msg, exc.msg)
             elseif ErrorType === UndefVarError
                 @test msg == exc.var
             end
@@ -1970,7 +2079,8 @@ const issue639report = []
         end
 
         # test errors are reported the the first time
-        check_revision_error(logs[1], LoadError, "missing comma or }", 2)
+        check_revision_error(logs[1], Base.VERSION < v"1.10" ? LoadError : Base.Meta.ParseError,
+                             Base.VERSION < v"1.10" ? "missing comma or }" : "Expected `}`", 2 + (Base.VERSION >= v"1.10"))
         # Check that there's an informative warning
         rec = logs[2]
         @test startswith(rec.message, "The running code does not match")
@@ -1986,7 +2096,8 @@ const issue639report = []
         logs,_ = Test.collect_test_logs() do
             Revise.errors()
         end
-        check_revision_error(logs[1], LoadError, "missing comma or }", 2)
+        check_revision_error(logs[1], Base.VERSION < v"1.10" ? LoadError : Base.Meta.ParseError,
+                             Base.VERSION < v"1.10" ? "missing comma or }" : "Expected `}`", 2 + (Base.VERSION >= v"1.10"))
 
         write(joinpath(dn, "RevisionErrors.jl"), """
             module RevisionErrors
@@ -2016,7 +2127,9 @@ const issue639report = []
         logs, _ = Test.collect_test_logs() do
             yry()
         end
-        check_revision_error(logs[1], LoadError, "unexpected \"=\"", 6)
+        delim = Base.VERSION < v"1.10" ? '"' : '`'
+        check_revision_error(logs[1], Base.VERSION < v"1.10" ? LoadError : Base.Meta.ParseError,
+                             "unexpected $delim=$delim", 6 + (Base.VERSION >= v"1.10")*2)
 
         write(joinpath(dn, "RevisionErrors.jl"), """
             module RevisionErrors
@@ -2062,7 +2175,11 @@ const issue639report = []
             revise(throw=true)
             false
         catch err
-            isa(err, LoadError) && occursin("""unexpected "}" """, err.error)
+            if Base.VERSION < v"1.10"
+                isa(err, LoadError) && occursin("""unexpected "}" """, errmsg(err.error))
+            else
+                isa(err, Base.Meta.ParseError) && occursin("Expected `)`", err.msg)
+            end
         end
         sleep(mtimedelay)
         write(joinpath(dn, "RevisionErrors.jl"), """
@@ -2956,6 +3073,66 @@ do_test("Switching free/dev") && @testset "Switching free/dev" begin
     push!(to_remove, depot)
 end
 
+do_test("Switching environments") && @testset "Switching environments" begin
+    old_project = Base.active_project()
+
+    function generate_package(path, val)
+        cd(path) do
+            pkgpath = normpath(joinpath(path, "TestPackage"))
+            srcpath = joinpath(pkgpath, "src")
+            if !isdir(srcpath)
+                Pkg.generate("TestPackage")
+            end
+            filepath = joinpath(srcpath, "TestPackage.jl")
+            write(filepath, """
+                module TestPackage
+                f() = $val
+                end
+                """)
+            return pkgpath
+        end
+    end
+
+    try
+        Pkg.activate(; temp=true)
+
+        # generate a package
+        root = mktempdir()
+        pkg = generate_package(root, 1)
+        LibGit2.with(LibGit2.init(pkg)) do repo
+            LibGit2.add!(repo, "Project.toml")
+            LibGit2.add!(repo, "src/TestPackage.jl")
+            test_sig = LibGit2.Signature("TEST", "TEST@TEST.COM", round(time(); digits=0), 0)
+            LibGit2.commit(repo, "version 1"; author=test_sig, committer=test_sig)
+        end
+
+        # install the package
+        Pkg.add(url=pkg)
+        sleep(mtimedelay)
+
+        @eval using TestPackage
+        sleep(mtimedelay)
+        @test Base.invokelatest(TestPackage.f) == 1
+
+        # update the package
+        generate_package(root, 2)
+        LibGit2.with(LibGit2.GitRepo(pkg)) do repo
+            LibGit2.add!(repo, "src/TestPackage.jl")
+            test_sig = LibGit2.Signature("TEST", "TEST@TEST.COM", round(time(); digits=0), 0)
+            LibGit2.commit(repo, "version 2"; author=test_sig, committer=test_sig)
+        end
+
+        # install the update
+        Pkg.add(url=pkg)
+        sleep(mtimedelay)
+
+        revise()
+        @test Base.invokelatest(TestPackage.f) == 2
+    finally
+        Pkg.activate(old_project)
+    end
+end
+
 # in v1.8 and higher, a package can't be loaded at all when its precompilation failed
 @static if Base.VERSION < v"1.8.0-DEV.1451"
 do_test("Broken dependencies (issue #371)") && @testset "Broken dependencies (issue #371)" begin
@@ -3631,7 +3808,7 @@ GC.gc(); GC.gc(); GC.gc()   # work-around for https://github.com/JuliaLang/julia
 # see #532 Fix InitError opening none existent Project.toml
 function load_in_empty_project_test()
     # This will try to load Revise in a julia seccion
-    # with an empty enviroment (missing Project.toml)
+    # with an empty environment (missing Project.toml)
 
     julia = Base.julia_cmd()
     revise_proj = escape_string(Base.active_project())
@@ -3661,16 +3838,16 @@ function load_in_empty_project_test()
     end
 end
 
-do_test("Import in empty enviroment (issue #532)") && @testset "Import in empty enviroment (issue #532)" begin
+do_test("Import in empty environment (issue #532)") && @testset "Import in empty environment (issue #532)" begin
     load_in_empty_project_test();
 end
 
 include("backedges.jl")
+
+include("non_jl_test.jl")
 
 do_test("Base signatures") && @testset "Base signatures" begin
     println("beginning signatures tests")
     # Using the extensive repository of code in Base as a testbed
     include("sigtest.jl")
 end
-
-include("non_jl_test.jl")

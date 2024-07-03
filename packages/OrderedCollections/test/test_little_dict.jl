@@ -39,6 +39,7 @@ using OrderedCollections: FrozenLittleDict, UnfrozenLittleDict
     end
 
     @testset "Constructors" begin
+        @test isa(@inferred(LittleDict{Any, Any, <:Tuple, <:Tuple}()), LittleDict{Any, Any, Tuple{}, Tuple{}})
         @test isa(@inferred(LittleDict()), LittleDict{Any,Any})
         @test isa(@inferred(LittleDict([(1,2.0)])), LittleDict{Int,Float64})
 
@@ -558,5 +559,18 @@ end # @testset LittleDict
         map!(v->v-1, values(testdict))
         @test testdict[:a] == 0
         @test testdict[:b] == 1
-end
+    end
+
+    @testset "lazy reverse iteration" begin
+        ks = collect('a':'z')
+        vs = collect(0:25)
+        ld = LittleDict(ks, vs)
+        pass = true
+        for (n,(k,v)) in enumerate(Iterators.reverse(ld))
+            pass &= reverse(ks)[n] == k
+            pass &= reverse(vs)[n] == v
+        end
+        @test pass
+    end
+
 end

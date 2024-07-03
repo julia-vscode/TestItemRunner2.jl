@@ -2,13 +2,11 @@
 const global maxallowedprobe = isdefined(Base, :maxallowedprobe) ? Base.maxallowedprobe : 16
 const global maxprobeshift   = isdefined(Base, :maxprobeshift) ? Base.maxprobeshift : 6
 
-# OrderedDict
-
 """
     OrderedDict
 
-`OrderedDict`s are  simply dictionaries  whose entries  have a  particular order.  The order
-refers to insertion order, which allows deterministic iteration over the dictionary or set.
+`OrderedDict`s are simply dictionaries whose entries have a particular order. The order
+refers to insertion order, which allows deterministic iteration over the dictionary.
 """
 mutable struct OrderedDict{K,V} <: AbstractDict{K,V}
     slots::Array{Int32,1}
@@ -17,38 +15,42 @@ mutable struct OrderedDict{K,V} <: AbstractDict{K,V}
     ndel::Int
     maxprobe::Int
     dirty::Bool
-
-    function OrderedDict{K,V}() where {K,V}
-        new{K,V}(zeros(Int32,16), Vector{K}(), Vector{V}(), 0, 0, false)
-    end
-    function OrderedDict{K,V}(kv) where {K,V}
-        h = OrderedDict{K,V}()
-        for (k,v) in kv
-            h[k] = v
-        end
-        return h
-    end
-    OrderedDict{K,V}(p::Pair) where {K,V} = setindex!(OrderedDict{K,V}(), p.second, p.first)
-    function OrderedDict{K,V}(ps::Pair...) where {K,V}
-        h = OrderedDict{K,V}()
-        sizehint!(h, length(ps))
-        for p in ps
-            h[p.first] = p.second
-        end
-        return h
-    end
-    function OrderedDict{K,V}(d::OrderedDict{K,V}) where {K,V}
-        if d.ndel > 0
-            rehash!(d)
-        end
-        @assert d.ndel == 0
-        new{K,V}(copy(d.slots), copy(d.keys), copy(d.vals), 0, d.maxprobe, false)
-    end
 end
+
+function OrderedDict{K,V}() where {K,V}
+    OrderedDict{K,V}(zeros(Int32,16), Vector{K}(), Vector{V}(), 0, 0, false)
+end
+
+function OrderedDict{K,V}(kv) where {K,V}
+    h = OrderedDict{K,V}()
+    for (k,v) in kv
+        h[k] = v
+    end
+    return h
+end
+
+OrderedDict{K,V}(p::Pair) where {K,V} = setindex!(OrderedDict{K,V}(), p.second, p.first)
+
+function OrderedDict{K,V}(ps::Pair...) where {K,V}
+    h = OrderedDict{K,V}()
+    sizehint!(h, length(ps))
+    for p in ps
+        h[p.first] = p.second
+    end
+    return h
+end
+
+function OrderedDict{K,V}(d::OrderedDict{K,V}) where {K,V}
+    if d.ndel > 0
+        rehash!(d)
+    end
+    @assert d.ndel == 0
+    OrderedDict{K,V}(copy(d.slots), copy(d.keys), copy(d.vals), 0, d.maxprobe, false)
+end
+
 OrderedDict() = OrderedDict{Any,Any}()
 OrderedDict(kv::Tuple{}) = OrderedDict()
 copy(d::OrderedDict) = OrderedDict(d)
-
 
 # TODO: this can probably be simplified using `eltype` as a THT (Tim Holy trait)
 # OrderedDict{K,V}(kv::Tuple{Vararg{Tuple{K,V}}})     = OrderedDict{K,V}(kv)
@@ -93,6 +95,7 @@ isordered(::Type{T}) where {T<:OrderedDict} = true
 
 # conversion between OrderedDict types
 function convert(::Type{OrderedDict{K,V}}, d::AbstractDict) where {K,V}
+    d isa OrderedDict{K, V} && return d
     if !isordered(typeof(d))
         Base.depwarn("Conversion to OrderedDict is deprecated for unordered associative containers (in this case, $(typeof(d))). Use an ordered or sorted associative type, such as SortedDict and OrderedDict.", :convert)
     end
@@ -107,7 +110,6 @@ function convert(::Type{OrderedDict{K,V}}, d::AbstractDict) where {K,V}
     end
     return h
 end
-convert(::Type{OrderedDict{K,V}},d::OrderedDict{K,V}) where {K,V} = d
 
 isslotempty(slot_value::Integer) = slot_value == 0
 isslotfilled(slot_value::Integer) = slot_value > 0
@@ -453,6 +455,21 @@ function iterate(t::OrderedDict, i)
     length(t.keys) < i && return nothing
     return (Pair(t.keys[i], t.vals[i]), i+1)
 end
+
+# lazy reverse iteration
+function iterate(rt::Iterators.Reverse{<:OrderedDict})
+    t = rt.itr
+    t.ndel > 0 && rehash!(t)
+    n = length(t.keys)
+    n < 1 && return nothing
+    return (Pair(t.keys[n], t.vals[n]), n - 1)
+end
+function iterate(rt::Iterators.Reverse{<:OrderedDict}, i)
+    t = rt.itr
+    i < 1 && return nothing
+    return (Pair(t.keys[i], t.vals[i]), i - 1)
+end
+
 
 function _merge_kvtypes(d, others...)
     K, V = keytype(d), valtype(d)

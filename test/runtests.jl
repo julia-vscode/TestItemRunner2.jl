@@ -25,6 +25,14 @@ include("json-samples.jl")
         include("parser/inttype.jl")
     end
 
+    @testset "nan_inf" begin
+        include("parser/nan-inf.jl")
+    end
+
+    @testset "null" begin
+        include("parser/null.jl")
+    end
+
     @testset "Miscellaneous" begin
         # test for single values
         @test JSON.parse("true") == true
@@ -75,6 +83,38 @@ end
     @testset "for issue #$i" for i in [21, 26, 57, 109, 152, 163]
         include("regression/issue$(lpad(string(i), 3, "0")).jl")
     end
+end
+
+mutable struct R1
+    id::Int
+    obj
+end
+
+struct MyCustomWriteContext <: JSON.Writer.RecursiveCheckContext
+    io
+    objectids::Set{UInt64}
+    recursive_cycle_token
+end
+MyCustomWriteContext(io) = MyCustomWriteContext(io, Set{UInt64}(), nothing)
+Base.print(io::MyCustomWriteContext, x::UInt8) = Base.print(io.io, x)
+for delegate in [:indent,
+    :delimit,
+    :separate,
+    :begin_array,
+    :end_array,
+    :begin_object,
+    :end_object]
+@eval JSON.Writer.$delegate(io::MyCustomWriteContext) = JSON.Writer.$delegate(io.io)
+end
+
+@testset "RecursiveCheckContext" begin
+    x = R1(1, nothing)
+    x.obj = x
+    str = JSON.json(x)
+    @test str == "{\"id\":1,\"obj\":null}"
+    io = IOBuffer()
+    str = JSON.show_json(MyCustomWriteContext(JSON.Writer.CompactContext(io)), JSON.Serializations.StandardSerialization(), x)
+    @test String(take!(io)) == "{\"id\":1,\"obj\":null}"
 end
 
 # Check that printing to the default stdout doesn't fail

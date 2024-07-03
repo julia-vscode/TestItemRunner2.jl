@@ -43,8 +43,7 @@ function signature(@nospecialize(recurse), frame::Frame, @nospecialize(stmt), pc
     while !isexpr(stmt, :method, 3)  # wait for the 3-arg version
         if isanonymous_typedef(stmt)
             lastpc = pc = step_through_methoddef(recurse, frame, stmt)   # define an anonymous function
-        elseif isexpr(stmt, :call) && (q = (stmt::Expr).args[1]; isa(q, QuoteNode) && q.value === Core.Typeof) &&
-               (sym = (stmt::Expr).args[2]; isa(sym, Symbol) && !isdefined(mod, sym))
+        elseif is_Typeof_for_anonymous_methoddef(stmt, frame.framecode.src.code, mod)
             return nothing, pc
         else
             lastpc = pc
@@ -60,6 +59,19 @@ function signature(@nospecialize(recurse), frame::Frame, @nospecialize(stmt), pc
 end
 signature(@nospecialize(recurse), frame::Frame, pc) = signature(recurse, frame, pc_expr(frame, pc), pc)
 signature(frame::Frame, pc) = signature(finish_and_return!, frame, pc)
+
+function is_Typeof_for_anonymous_methoddef(@nospecialize(stmt), code::Vector{Any}, mod::Module)
+    isexpr(stmt, :call) || return false
+    f = stmt.args[1]
+    isa(f, QuoteNode) || return false
+    f.value === Core.Typeof || return false
+    arg1 = stmt.args[2]
+    if isa(arg1, SSAValue)
+        arg1 = code[arg1.id]
+    end
+    arg1 isa Symbol || return false
+    return !isdefined(mod, arg1)
+end
 
 function minid(@nospecialize(node), stmts, id)
     if isa(node, SSAValue)
@@ -134,16 +146,18 @@ function identify_framemethod_calls(frame)
     for (i, stmt) in enumerate(frame.framecode.src.code)
         isa(stmt, Expr) || continue
         if stmt.head === :global && length(stmt.args) == 1
-            key = stmt.args[1]::Symbol
-            # We don't know for sure if this is a reference to a method, but let's
-            # tentatively cue it
-            push!(refs, key=>i)
+            key = stmt.args[1]
+            if isa(key, Symbol)
+                # We don't know for sure if this is a reference to a method, but let's
+                # tentatively cue it
+                push!(refs, key=>i)
+            end
         elseif stmt.head === :thunk && stmt.args[1] isa CodeInfo
             tsrc = stmt.args[1]::CodeInfo
             if length(tsrc.code) == 1
                 tstmt = tsrc.code[1]
                 if is_return(tstmt)
-                    tex = JuliaInterpreter.get_return_node(tstmt)
+                    tex = tstmt.val
                     if isa(tex, Expr)
                         if tex.head === :method && (methname = tex.args[1]; isa(methname, Symbol))
                             push!(refs, methname=>i)
@@ -165,7 +179,9 @@ function identify_framemethod_calls(frame)
             key = stmt.args[1]
             key = normalize_defsig(key, frame)
             if key isa Symbol
-                mi = methodinfos[key]
+                # XXX A temporary hack to fix https://github.com/JuliaDebug/LoweredCodeUtils.jl/issues/80
+                #     We should revisit it.
+                mi = get(methodinfos, key, MethodInfo(1))
                 mi.stop = i
             elseif key isa Expr   # this is a module-scoped call. We don't have to worry about these because they are named
                 continue
@@ -175,11 +191,19 @@ function identify_framemethod_calls(frame)
                 key = key::Union{Symbol,Bool,Nothing}
                 for (j, mstmt) in enumerate(msrc.code)
                     isa(mstmt, Expr) || continue
+                    jj = j
                     if mstmt.head === :call
                         mkey = mstmt.args[1]
+                        if isa(mkey, SSAValue) || isa(mkey, Core.SSAValue)
+                            refstmt = msrc.code[mkey.id]
+                            if isa(refstmt, Symbol)
+                                jj = mkey.id
+                                mkey = refstmt
+                            end
+                        end
                         if isa(mkey, Symbol)
                             # Could be a GlobalRef but then it's outside frame
-                            haskey(methodinfos, mkey) && push!(selfcalls, SelfCall(i, j, mkey, key))
+                            haskey(methodinfos, mkey) && push!(selfcalls, SelfCall(i, jj, mkey, key))
                         elseif is_global_ref(mkey, Core, isdefined(Core, :_apply_iterate) ? :_apply_iterate : :_apply)
                             ssaref = mstmt.args[end-1]
                             if isa(ssaref, JuliaInterpreter.SSAValue)
@@ -188,7 +212,7 @@ function identify_framemethod_calls(frame)
                             end
                             mkey = mstmt.args[end-2]
                             if isa(mkey, Symbol)
-                                haskey(methodinfos, mkey) && push!(selfcalls, SelfCall(i, j, mkey, key))
+                                haskey(methodinfos, mkey) && push!(selfcalls, SelfCall(i, jj, mkey, key))
                             end
                         end
                     elseif mstmt.head === :meta && mstmt.args[1] === :generated
@@ -196,7 +220,7 @@ function identify_framemethod_calls(frame)
                         if isa(newex, Expr)
                             if newex.head === :new && length(newex.args) >= 2 && is_global_ref(newex.args[1], Core, :GeneratedFunctionStub)
                                 mkey = newex.args[2]::Symbol
-                                haskey(methodinfos, mkey) && push!(selfcalls, SelfCall(i, j, mkey, key))
+                                haskey(methodinfos, mkey) && push!(selfcalls, SelfCall(i, jj, mkey, key))
                             end
                         end
                     end
@@ -260,7 +284,7 @@ function set_to_running_name!(@nospecialize(recurse), replacements, frame, metho
     replacements[callee] = cname
     mi = methodinfos[cname] = methodinfos[callee]
     src = frame.framecode.src
-    replacename!(src.code[mi.start:mi.stop], callee=>cname)        # the method itself
+    replacename!(@view(src.code[mi.start:mi.stop]), callee=>cname) # the method itself
     for r in mi.refs                                               # the references
         replacename!((src.code[r])::Expr, callee=>cname)
     end
@@ -342,7 +366,7 @@ function find_name_caller_sig(@nospecialize(recurse), frame, pc, name, parentnam
             end
             if length(body.code) > 1
                 bodystmt = body.code[end-1]  # the line before the final return
-                iscallto(bodystmt, name) && return signature_top(frame, stmt, pc), false
+                iscallto(bodystmt, name, body) && return signature_top(frame, stmt, pc), false
             end
         end
         pc = next_or_nothing(frame, pc)
@@ -363,7 +387,7 @@ end
 
 replacename!(src::CodeInfo, pr) = replacename!(src.code, pr)
 
-function replacename!(args::Vector{Any}, pr)
+function replacename!(args::AbstractVector, pr)
     oldname, newname = pr
     for i = 1:length(args)
         a = args[i]
@@ -375,6 +399,9 @@ function replacename!(args::Vector{Any}, pr)
             args[i] = QuoteNode(newname)
         elseif isa(a, Vector{Any})
             replacename!(a, pr)
+        elseif isa(a, Core.ReturnNode) && isdefined(a, :val) && a.val isa Expr
+            # there is something like `ReturnNode(Expr(:method, Symbol(...)))`
+            replacename!(a.val::Expr, pr)
         elseif a === oldname
             args[i] = newname
         end
@@ -409,6 +436,9 @@ function get_running_name(@nospecialize(recurse), frame, pc, name, parentname)
         bodystmt = bodyparent.code[end-1]
         @assert isexpr(bodystmt, :call)
         ref = getcallee(bodystmt)
+        if isa(ref, SSAValue) || isa(ref, Core.SSAValue)
+            ref = bodyparent.code[ref.id]
+        end
         isa(ref, GlobalRef) || @show ref typeof(ref)
         @assert isa(ref, GlobalRef)
         @assert ref.mod == moduleof(frame)
@@ -480,15 +510,28 @@ function methoddef!(@nospecialize(recurse), signatures, frame::Frame, @nospecial
         frame.pc = pc
         return pc, pc3
     end
-    ismethod1(stmt) || error("expected method opening, got ", stmt)
+    ismethod1(stmt) || Base.invokelatest(error, "expected method opening, got ", stmt)
     name = stmt.args[1]
     name = normalize_defsig(name, frame)
     if isa(name, Bool)
         error("not valid for anonymous methods")
     elseif name === missing
-        error("given invalid definition: $stmt")
+        Base.invokelatest(error, "given invalid definition: ", stmt)
     end
     name = name::Symbol
+    # Is there any 3-arg method definition with the same name? If not, avoid risk of executing code that
+    # we shouldn't (fixes https://github.com/timholy/Revise.jl/issues/758)
+    found = false
+    for i = pc+1:length(framecode.src.code)
+        newstmt = framecode.src.code[i]
+        if ismethod3(newstmt)
+            if ismethod_with_name(framecode.src, newstmt, string(name))
+                found = true
+                break
+            end
+        end
+    end
+    found || return nothing
     while true  # methods containing inner methods may need multiple trips through this loop
         sigt, pc = signature(recurse, frame, stmt, pc)
         stmt = pc_expr(frame, pc)
@@ -551,7 +594,7 @@ function _methoddefs!(@nospecialize(recurse), signatures, frame::Frame, pc; defi
     return pc
 end
 
-function is_self_call(@nospecialize(stmt), slotnames, argno=1)
+function is_self_call(@nospecialize(stmt), slotnames, argno::Integer=1)
     if isa(stmt, Expr)
         if stmt.head == :call
             a = stmt.args[argno]
@@ -582,44 +625,54 @@ Return the "body method" for a method `m`. `mbody` contains the code of the func
 when `m` was defined.
 """
 function bodymethod(mkw::Method)
-    m = mkw
-    local src
-    while true
-        framecode = JuliaInterpreter.get_framecode(m)
-        fakeargs = Any[nothing for i = 1:(framecode.scope::Method).nargs]
-        frame = JuliaInterpreter.prepare_frame(framecode, fakeargs, isa(m.sig, UnionAll) ? sparam_ub(m) : Core.svec())
-        src = framecode.src
-        (length(src.code) > 1 && is_self_call(src.code[end-1], src.slotnames)) || break
-        # Build the optional arg, so we can get its type
-        pc = frame.pc
-        while pc < length(src.code) - 1
-            pc = step_expr!(frame)
+    @static if isdefined(Core, :kwcall)
+        Base.unwrap_unionall(mkw.sig).parameters[1] !== typeof(Core.kwcall) && isempty(Base.kwarg_decl(mkw)) && return mkw
+        mths = methods(Base.bodyfunction(mkw))
+        if length(mths) != 1
+            @show mkw
+            display(mths)
         end
-        val = pc > 1 ? frame.framedata.ssavalues[pc-1] : (src.code[1]::Expr).args[end]
-        sig = Tuple{(Base.unwrap_unionall(m.sig)::DataType).parameters..., typeof(val)}
-        m = whichtt(sig)
-    end
-    length(src.code) > 1 || return m
-    stmt = src.code[end-1]
-    if isexpr(stmt, :call) && (f = (stmt::Expr).args[1]; isa(f, QuoteNode))
-        if f.value === (isdefined(Core, :_apply_iterate) ? Core._apply_iterate : Core._apply)
-            ssaref = stmt.args[end-1]
-            if isa(ssaref, JuliaInterpreter.SSAValue)
-                id = ssaref.id
-                has_self_call(src, src.code[id]) || return m
+        return only(mths)
+    else
+        m = mkw
+        local src
+        while true
+            framecode = JuliaInterpreter.get_framecode(m)
+            fakeargs = Any[nothing for i = 1:(framecode.scope::Method).nargs]
+            frame = JuliaInterpreter.prepare_frame(framecode, fakeargs, isa(m.sig, UnionAll) ? sparam_ub(m) : Core.svec())
+            src = framecode.src
+            (length(src.code) > 1 && is_self_call(src.code[end-1], src.slotnames)) || break
+            # Build the optional arg, so we can get its type
+            pc = frame.pc
+            while pc < length(src.code) - 1
+                pc = step_expr!(frame)
             end
-            f = stmt.args[end-2]
-            if isa(f, JuliaInterpreter.SSAValue)
-                f = src.code[f.id]
+            val = pc > 1 ? frame.framedata.ssavalues[pc-1] : (src.code[1]::Expr).args[end]
+            sig = Tuple{(Base.unwrap_unionall(m.sig)::DataType).parameters..., typeof(val)}
+            m = whichtt(sig)
+        end
+        length(src.code) > 1 || return m
+        stmt = src.code[end-1]
+        if isexpr(stmt, :call) && (f = (stmt::Expr).args[1]; isa(f, QuoteNode))
+            if f.value === (isdefined(Core, :_apply_iterate) ? Core._apply_iterate : Core._apply)
+                ssaref = stmt.args[end-1]
+                if isa(ssaref, JuliaInterpreter.SSAValue)
+                    id = ssaref.id
+                    has_self_call(src, src.code[id]) || return m
+                end
+                f = stmt.args[end-2]
+                if isa(f, JuliaInterpreter.SSAValue)
+                    f = src.code[f.id]
+                end
+            else
+                has_self_call(src, stmt) || return m
             end
-        else
-            has_self_call(src, stmt) || return m
+            f = f.value
+            mths = methods(f)
+            if length(mths) == 1
+                return first(mths)
+            end
         end
-        f = f.value
-        mths = methods(f)
-        if length(mths) == 1
-            return first(mths)
-        end
+        return m
     end
-    return m
 end

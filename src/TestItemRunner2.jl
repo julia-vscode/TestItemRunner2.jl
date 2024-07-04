@@ -9,7 +9,7 @@ const pkg_root = "../packages"
 import JSON, JSONRPC, ProgressMeter, TOML, UUIDs, Sockets, JuliaWorkspaces
 
 using JSONRPC: @dict_readable
-using JuliaWorkspaces: JuliaWorkspace, get_text
+using JuliaWorkspaces: JuliaWorkspace
 using JuliaWorkspaces.URIs2: URI, filepath2uri, uri2filepath
 
 include("vendored_code.jl")
@@ -30,14 +30,16 @@ const SOME_TESTITEM_FINISHED = Base.Event(true)
 
 function get_key_from_testitem(testitem)
     return (
-        project_uri = testitem.detail.project_uri,
-        package_uri = testitem.detail.package_uri,
-        package_name = testitem.detail.package_name
+        project_uri = testitem.env.project_uri,
+        package_uri = testitem.env.package_uri,
+        package_name = testitem.env.package_name
     )
 end
 
 function launch_new_process(testitem)
     key = get_key_from_testitem(testitem)
+
+    println("Key is $key")
 
     pipe_name = generate_pipe_name("tir", UUIDs.uuid4())
 
@@ -56,7 +58,13 @@ function launch_new_process(testitem)
         )
     )
 
+    sleep(5)
+
+    println("We launched and $jl_process")
+
     socket = Sockets.accept(server)
+
+    println("Do we get accepted?")
 
     connection = JSONRPC.JSONRPCEndpoint(socket, socket)
 
@@ -221,39 +229,53 @@ function execute_test(test_process, testitem, testsetups, timeout)
 end
 
 function run_tests(path; filter=nothing, verbose=false, max_workers::Int=Sys.CPU_THREADS, timeout=60*5, return_results=false, print_failed_results=true)
-    jw = JuliaWorkspace(Set([filepath2uri(path)]))
+    jw = JuliaWorkspaces.workspace_from_folders(([path]))
 
-    if count(i -> true, Iterators.flatten(values(jw._testerrors))) > 0
-        println("There are errors in your test definitions, we are aborting.")
+    # TODO Reenable
+    # if count(i -> true, Iterators.flatten(values(jw._testerrors))) > 0
+    #     println("There are errors in your test definitions, we are aborting.")
 
-        for te in Iterators.flatten(values(jw._testerrors))
-            pos = JuliaWorkspaces.get_position_from_offset(jw._text_documents[te.uri], te.range[1])
-            println()
-            println("File: $(uri2filepath(te.uri)):$(pos[1]+1)")
-            println()
-            println(te.message)
-            println()
-        end
+    #     for te in Iterators.flatten(values(jw._testerrors))
+    #         pos = JuliaWorkspaces.get_position_from_offset(jw._text_documents[te.uri], te.range[1])
+    #         println()
+    #         println("File: $(uri2filepath(te.uri)):$(pos[1]+1)")
+    #         println()
+    #         println(te.message)
+    #         println()
+    #     end
 
-        return nothing
-    end
+    #     return nothing
+    # end
 
     # testsetups maps @testsetup PACKAGE => NAME => TESTSETUPdetail
     testsetups = Dict{JuliaWorkspaces.URIs2.URI,Dict{Symbol,Any}}()
-    for i in Iterators.flatten(values(jw._testsetups))
-        testsetups_in_package = get!(() -> Dict{Symbol,Any}(), testsetups, i.package_uri)
+    # TODO Reenable
+    # for i in Iterators.flatten(values(jw._testsetups))
+    #     testsetups_in_package = get!(() -> Dict{Symbol,Any}(), testsetups, i.package_uri)
 
-        haskey(testsetups_in_package, i.name) && error("The name '$(i.name)' is used for more than one test setup.")
+    #     haskey(testsetups_in_package, i.name) && error("The name '$(i.name)' is used for more than one test setup.")
 
-        testsetups_in_package[i.name] = (detail=i, code=get_text(jw._text_documents[i.uri])[i.code_range])
-    end
+    #     testsetups_in_package[i.name] = (detail=i, code=get_text(jw._text_documents[i.uri])[i.code_range])
+    # end
 
     # Flat list of @testitems
-    testitems = [(detail=i, code=get_text(jw._text_documents[i.uri])[i.code_range]) for i in Iterators.flatten(values(jw._testitems))]   
+    testitems = []
+    for (uri, items) in pairs(JuliaWorkspaces.get_test_items(jw))
+        project_details = JuliaWorkspaces.get_test_env(jw, uri)
+
+        for item in items.testitems
+            push!(testitems, (
+                uri=uri,
+                code=JuliaWorkspaces.get_text_file(jw, uri).content.content[item.code_range], env=project_details, detail=item),
+            )
+        end
+    end
+
+    # testitems = [(detail=i, code=get_text(jw._text_documents[i.uri])[i.code_range]) for i in Iterators.flatten(values(jw._testitems))]   
 
     # Filter @testitems
     if filter !== nothing
-        filter!(i->filter((filename=uri2filepath(i.detail.uri), name=i.detail.name, tags=i.detail.option_tags, package_name=i.detail.package_name)), testitems)
+        filter!(i->filter((filename=uri2filepath(i.uri), name=i.detail.name, tags=i.detail.option_tags, package_name=i.detail.package_name)), testitems)
     end
 
     executed_testitems = []

@@ -1,0 +1,64 @@
+name: CI
+on:
+  pull_request:
+    branches:
+      - master
+  push:
+    branches:
+      - master
+    tags: '*'
+jobs:
+  test:
+    name: Julia ${{ matrix.version }} - ${{ matrix.os }} - ${{ matrix.arch }} - ${{ github.event_name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        version:
+          - '1.6'  # latest LTS
+          - '1'
+          - 'nightly'
+        os:
+          - ubuntu-latest
+          - macOS-latest
+          - windows-latest
+        arch:
+          - x64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@latest
+        with:
+          version: ${{ matrix.version }}
+          arch: ${{ matrix.arch }}
+      - uses: julia-actions/cache@v1
+      - uses: julia-actions/julia-buildpkg@latest
+      - uses: julia-actions/julia-runtest@latest
+      - name: Revise tests
+        if: ${{ matrix.os == 'ubuntu-latest' }}
+        run: |
+          julia -e '
+            using Pkg
+            Pkg.develop(path=".")
+            Pkg.add(url="https://github.com/timholy/Revise.jl")
+            Pkg.test("Revise")
+          '
+      - name: Test while running Revise
+        if: ${{ matrix.os == 'ubuntu-latest' && matrix.version != '1.0' }}
+        run: |
+          TERM="xterm" julia --project -i --code-coverage -e '
+            using InteractiveUtils, REPL, Revise, Pkg
+            Pkg.add("ColorTypes")
+            @async(Base.run_main_repl(true, true, false, true, false))
+            sleep(2)
+            cd("test")
+            include("runtests.jl")
+            if Base.VERSION.major == 1 && Base.VERSION.minor >= 9
+                REPL.eval_user_input(:(exit()), Base.active_repl_backend, Main)
+            else
+                REPL.eval_user_input(:(exit()), Base.active_repl_backend)
+            end
+          '
+      - uses: julia-actions/julia-processcoverage@latest
+      - uses: codecov/codecov-action@v3
+        with:
+          file: lcov.info

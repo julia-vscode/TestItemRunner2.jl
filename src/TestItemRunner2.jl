@@ -39,8 +39,6 @@ end
 function launch_new_process(testitem)
     key = get_key_from_testitem(testitem)
 
-    println("Key is $key")
-
     pipe_name = generate_pipe_name("tir", UUIDs.uuid4())
 
     server = Sockets.listen(pipe_name)
@@ -58,13 +56,7 @@ function launch_new_process(testitem)
         )
     )
 
-    sleep(5)
-
-    println("We launched and $jl_process")
-
     socket = Sockets.accept(server)
-
-    println("Do we get accepted?")
 
     connection = JSONRPC.JSONRPCEndpoint(socket, socket)
 
@@ -128,7 +120,7 @@ function get_free_testprocess(testitem, max_num_processes)
                         status = run_revise(test_process)
 
                         if status != "success"
-                            terminate(test_process)
+                            kill(test_process.process)
 
                             needs_new_process = true
                         end
@@ -185,13 +177,15 @@ function execute_test(test_process, testitem, testsetups, timeout)
             TestserverRunTestitemRequestParams(
                 string(testitem.detail.uri),
                 testitem.detail.name,
-                testitem.detail.package_name,
+                testitem.env.package_name,
                 testitem.detail.option_default_imports,
                 convert(Vector{String}, string.(testitem.detail.option_setup)),
                 # TODO use proper location info here
                 1, #pos.line,
                 1, #pos.column,
-                testitem.code
+                testitem.code,
+                "Normal",
+                nothing
             )
         )
 
@@ -209,7 +203,7 @@ function execute_test(test_process, testitem, testsetups, timeout)
         push!(return_value, (status = result.status, message = result.message, duration = result.duration, log_out = out_log, log_err = err_log))
     catch err
         if err isa InvalidStateException
-
+            
             try
                 out_log = String(take!(test_process.log_out))
                 err_log = String(take!(test_process.log_err))
@@ -266,7 +260,9 @@ function run_tests(path; filter=nothing, verbose=false, max_workers::Int=Sys.CPU
         for item in items.testitems
             push!(testitems, (
                 uri=uri,
-                code=JuliaWorkspaces.get_text_file(jw, uri).content.content[item.code_range], env=project_details, detail=item),
+                code=JuliaWorkspaces.get_text_file(jw, uri).content.content[item.code_range],
+                env=project_details,
+                detail=item),
             )
         end
     end
@@ -290,7 +286,7 @@ function run_tests(path; filter=nothing, verbose=false, max_workers::Int=Sys.CPU
     for testitem in testitems
         test_process = get_free_testprocess(testitem, max_workers)
 
-        result_channel = execute_test(test_process, testitem, get(()->Dict{Symbol,Any}(), testsetups, testitem.detail.package_uri), timeout)
+        result_channel = execute_test(test_process, testitem, get(()->Dict{Symbol,Any}(), testsetups, testitem.env.package_uri), timeout)
 
         progress_reported_channel = Channel(1)
 

@@ -5,10 +5,10 @@ popfirst!(LOAD_PATH)
 import Sockets
 
 try
-    conn = Sockets.connect(ARGS[1])
-
-    TestItemServer.serve(conn, ARGS[2], ARGS[3], ARGS[4])
+    TestItemServer.serve(ARGS[1], nothing, ARGS[2], ARGS[3], ARGS[4])
 
 catch err
-    Base.display(err)
+    open("testservererror.txt", "w") do file
+        Base.display_error(file, err,catch_backtrace())
+    end
 end

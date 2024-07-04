@@ -450,7 +450,9 @@ function get_debug_session_if_present()
 end
 
 function serve(pipename, debug_pipename, project_path, package_path, package_name; is_dev=false, error_handler=nothing)
-    start_debug_backend(debug_pipename, error_handler)
+    if debug_pipename!==nothing
+        start_debug_backend(debug_pipename, error_handler)
+    end
 
     conn = Sockets.connect(pipename)
 

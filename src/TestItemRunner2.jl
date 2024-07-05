@@ -1,16 +1,17 @@
 module TestItemRunner2
 
-export run_tests, kill_test_processes
+export run_tests, kill_test_processes, TestEnvironment
 
 # For easier dev, switch these two lines
 const pkg_root = "../packages"
 # const pkg_root = joinpath(homedir(), ".julia", "dev")
 
-import JSON, JSONRPC, ProgressMeter, TOML, UUIDs, Sockets, JuliaWorkspaces
+import JSON, JSONRPC, ProgressMeter, TOML, UUIDs, Sockets, JuliaWorkspaces, AutoHashEquals
 
 using JSONRPC: @dict_readable
 using JuliaWorkspaces: JuliaWorkspace
 using JuliaWorkspaces.URIs2: URI, filepath2uri, uri2filepath
+using AutoHashEquals: @auto_hash_equals
 
 include("vendored_code.jl")
 
@@ -25,19 +26,25 @@ mutable struct TestProcess
     log_err
 end
 
-const TEST_PROCESSES = Dict{NamedTuple{(:project_uri,:package_uri,:package_name),Tuple{Union{URI,Nothing},URI,String}},Vector{TestProcess}}()
+@auto_hash_equals struct TestEnvironment
+    name::String
+    env::Dict{String,String}
+end
+
+const TEST_PROCESSES = Dict{NamedTuple{(:project_uri,:package_uri,:package_name,:environment),Tuple{Union{URI,Nothing},URI,String,TestEnvironment}},Vector{TestProcess}}()
 const SOME_TESTITEM_FINISHED = Base.Event(true)
 
-function get_key_from_testitem(testitem)
+function get_key_from_testitem(testitem, environment)
     return (
         project_uri = testitem.env.project_uri,
         package_uri = testitem.env.package_uri,
-        package_name = testitem.env.package_name
+        package_name = testitem.env.package_name,
+        environment = environment
     )
 end
 
-function launch_new_process(testitem)
-    key = get_key_from_testitem(testitem)
+function launch_new_process(testitem, environment)
+    key = get_key_from_testitem(testitem, environment)
 
     pipe_name = generate_pipe_name("tir", UUIDs.uuid4())
 
@@ -50,7 +57,10 @@ function launch_new_process(testitem)
 
     jl_process = open(
         pipeline(
-            Cmd(`$(Base.julia_cmd()) --startup-file=no --history-file=no --depwarn=no $testserver_script $pipe_name $(key.project_uri===nothing ? "" : uri2filepath(key.project_uri)) $(uri2filepath(key.package_uri)) $(key.package_name)`),
+            addenv(
+                Cmd(`julia --startup-file=no --history-file=no --depwarn=no $testserver_script $pipe_name $(key.project_uri===nothing ? "" : uri2filepath(key.project_uri)) $(uri2filepath(key.package_uri)) $(key.package_name)`),
+                environment.env
+            ),
             stdout = buffer_out,
             stderr = buffer_err
         )
@@ -98,11 +108,11 @@ function run_revise(testprocess)
     return JSONRPC.send(testprocess.connection,testserver_revise_request_type, nothing)
 end
 
-function get_free_testprocess(testitem, max_num_processes)
-    key = get_key_from_testitem(testitem)
+function get_free_testprocess(testitem, environment, max_num_processes)
+    key = get_key_from_testitem(testitem, environment)
 
     if !haskey(TEST_PROCESSES, key)
-        return launch_new_process(testitem)
+        return launch_new_process(testitem, environment)
     else
         test_processes = TEST_PROCESSES[key]
 
@@ -127,7 +137,7 @@ function get_free_testprocess(testitem, max_num_processes)
                     end
 
                     if needs_new_process
-                        test_process = launch_new_process(testitem)
+                        test_process = launch_new_process(testitem, environment)
                     end
 
                     return test_process
@@ -135,7 +145,7 @@ function get_free_testprocess(testitem, max_num_processes)
             end
 
             if length(test_processes) < max_num_processes
-                return launch_new_process(testitem)
+                return launch_new_process(testitem, environment)
             else
                 wait(SOME_TESTITEM_FINISHED)
             end
@@ -185,7 +195,7 @@ function execute_test(test_process, testitem, testsetups, timeout)
                 1, #pos.column,
                 testitem.code,
                 "Normal",
-                nothing
+                missing
             )
         )
 
@@ -222,7 +232,7 @@ function execute_test(test_process, testitem, testsetups, timeout)
     return return_value
 end
 
-function run_tests(path; filter=nothing, verbose=false, max_workers::Int=Sys.CPU_THREADS, timeout=60*5, return_results=false, print_failed_results=true)
+function run_tests(path; filter=nothing, verbose=false, max_workers::Int=Sys.CPU_THREADS, timeout=60*5, return_results=false, print_failed_results=true, environments=[TestEnvironment("Default", Dict{String,String}())])
     jw = JuliaWorkspaces.workspace_from_folders(([path]))
 
     # TODO Reenable
@@ -276,15 +286,15 @@ function run_tests(path; filter=nothing, verbose=false, max_workers::Int=Sys.CPU
 
     executed_testitems = []
 
-    p = ProgressMeter.Progress(length(testitems), barlen=50)
+    p = ProgressMeter.Progress(length(testitems)*length(environments), barlen=50)
 
     count_success = 0
     count_timeout = 0
     count_fail = 0
 
     # Loop over all test items that should be executed
-    for testitem in testitems
-        test_process = get_free_testprocess(testitem, max_workers)
+    for testitem in testitems, environment in environments
+        test_process = get_free_testprocess(testitem, environment, max_workers)
 
         result_channel = execute_test(test_process, testitem, get(()->Dict{Symbol,Any}(), testsetups, testitem.env.package_uri), timeout)
 

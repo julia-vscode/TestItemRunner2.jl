@@ -115,7 +115,7 @@ end
 
 function process_coverage_data(coverage_results)
     if length(coverage_results) == 0
-        return nothing
+        return missing
     end
 
     merged_coverage = CoverageTools.merge_coverage_counts(coverage_results)
@@ -149,8 +149,8 @@ function run_testitem_handler(conn, params::TestserverRunTestitemRequestParams)
                         )
                     )
                 ],
-                nothing,
-                nothing
+                missing,
+                missing
             )
             return ret
         end
@@ -197,7 +197,7 @@ function run_testitem_handler(conn, params::TestserverRunTestitemRequestParams)
                         )
                     ],
                     elapsed_time,
-                    nothing
+                    missing
                 )
             end
         end
@@ -220,8 +220,8 @@ function run_testitem_handler(conn, params::TestserverRunTestitemRequestParams)
                         )
                     )
                 ],
-                nothing,
-                nothing
+                missing,
+                missing
             )
         end
 
@@ -249,7 +249,7 @@ function run_testitem_handler(conn, params::TestserverRunTestitemRequestParams)
                             )
                         )
                     ],
-                    nothing,
+                    missing,
                     process_coverage_data(coverage_results)
                 )
             end
@@ -271,8 +271,8 @@ function run_testitem_handler(conn, params::TestserverRunTestitemRequestParams)
                         )
                     )
                 ],
-                nothing,
-                nothing
+                missing,
+                missing
             )
         end
     end
@@ -343,7 +343,7 @@ function run_testitem_handler(conn, params::TestserverRunTestitemRequestParams)
     try
         Test.finish(ts)
 
-        return TestserverRunTestitemRequestParamsReturn("passed", nothing, elapsed_time, process_coverage_data(coverage_results))
+        return TestserverRunTestitemRequestParamsReturn("passed", missing, elapsed_time, process_coverage_data(coverage_results))
     catch err
         if err isa Test.TestSetException
             failed_tests = Test.filter_errors(ts)
@@ -386,7 +386,7 @@ function extract_expected_and_actual(result)
             end
         end
     end
-    return (nothing, nothing)
+    return (missing, missing)
 end
 
 function serve_in_env(conn)

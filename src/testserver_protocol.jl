@@ -21,12 +21,12 @@ end
 
 @dict_readable struct TestMessage
     message::String
-    expectedOutput::Union{String,Nothing}
-    actualOutput::Union{String,Nothing}
-    location::Union{Nothing,Location}
+    expectedOutput::Union{String,Missing}
+    actualOutput::Union{String,Missing}
+    location::Location
 end
 
-TestMessage(message, location) = TestMessage(message, nothing, nothing, location)
+TestMessage(message, location) = TestMessage(message, missing, missing, location)
 
 JSONRPC.@dict_readable struct TestserverRunTestitemRequestParams <: JSONRPC.Outbound
     uri::String
@@ -38,7 +38,7 @@ JSONRPC.@dict_readable struct TestserverRunTestitemRequestParams <: JSONRPC.Outb
     column::Int
     code::String
     mode::String
-    coverageRoots::Union{Vector{String},Nothing}
+    coverageRoots::Union{Vector{String},Missing}
 end
 
 JSONRPC.@dict_readable struct FileCoverage <: JSONRPC.Outbound
@@ -48,9 +48,9 @@ end
 
 JSONRPC.@dict_readable struct TestserverRunTestitemRequestParamsReturn <: JSONRPC.Outbound
     status::String
-    message::Union{Vector{TestMessage},Nothing}
-    duration::Union{Float64,Nothing}
-    coverage::Union{Nothing,Vector{FileCoverage}}
+    message::Union{Vector{TestMessage},Missing}
+    duration::Union{Float64,Missing}
+    coverage::Union{Missing,Vector{FileCoverage}}
 end
 
 JSONRPC.@dict_readable struct TestsetupDetails <: JSONRPC.Outbound

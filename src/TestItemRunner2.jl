@@ -294,6 +294,7 @@ function run_tests(path; filter=nothing, verbose=false, max_workers::Int=Sys.CPU
     count_success = 0
     count_timeout = 0
     count_fail = 0
+    count_error = 0
 
     # Loop over all test items that should be executed
     for testitem in testitems, environment in environments
@@ -312,6 +313,10 @@ function run_tests(path; filter=nothing, verbose=false, max_workers::Int=Sys.CPU
                 count_timeout += 1
             elseif res.status == "failed"
                 count_fail += 1
+            elseif res.status == "errored"
+                count_error += 1
+            else
+                error("Unknown test status")
             end
 
             ProgressMeter.next!(
@@ -319,6 +324,7 @@ function run_tests(path; filter=nothing, verbose=false, max_workers::Int=Sys.CPU
                 showvalues = [
                     (Symbol("Successful tests"), count_success),
                     (Symbol("Failed tests"), count_fail),
+                    (Symbol("Errored tests"), count_error),
                     (Symbol("Timed out tests"), count_timeout),
                     ((Symbol("Number of processes for package '$(i.first.package_name)'"), length(i.second)) for i in TEST_PROCESSES)...
                 ]
@@ -341,7 +347,7 @@ function run_tests(path; filter=nothing, verbose=false, max_workers::Int=Sys.CPU
 
     if print_failed_results
         for i in responses
-            if i.result.status == "failed" && i.result.message!==missing                
+            if i.result.status in ("failed", "errored") && i.result.message!==missing                
                 println()
                 println("Errors for test $(i.testitem.detail.name)")
                 for j in i.result.message
@@ -356,7 +362,7 @@ function run_tests(path; filter=nothing, verbose=false, max_workers::Int=Sys.CPU
         wait(i.progress_reported_channel)
     end
 
-    println("$(length(responses)) tests ran, $(count_success) passed, $(count_fail) failed, $(count_timeout) timed out.")
+    println("$(length(responses)) tests ran, $(count_success) passed, $(count_fail) failed, $(count_error) errored, $(count_timeout) timed out.")
 
     if return_results
         return responses

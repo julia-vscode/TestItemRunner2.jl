@@ -378,6 +378,13 @@ function extract_expected_and_actual(result)
                 try
                     expected = unescape_string(m.captures[1])
                     actual = unescape_string(m.captures[2])
+
+                    if expected === nothing
+                        expected = missing
+                    end
+                    if actual ===nothing
+                        actual = missing
+                    end
                     return (expected, actual)
                 catch err
                     # theoretically possible if a user registers a Fail instance that matches

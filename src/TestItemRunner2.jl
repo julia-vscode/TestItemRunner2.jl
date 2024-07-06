@@ -190,9 +190,8 @@ function execute_test(test_process, testitem, testsetups, timeout)
                 testitem.env.package_name,
                 testitem.detail.option_default_imports,
                 convert(Vector{String}, string.(testitem.detail.option_setup)),
-                # TODO use proper location info here
-                1, #pos.line,
-                1, #pos.column,
+                testitem.line,
+                testitem.column,
                 testitem.code,
                 "Normal",
                 missing
@@ -268,9 +267,13 @@ function run_tests(path; filter=nothing, verbose=false, max_workers::Int=Sys.CPU
         project_details = JuliaWorkspaces.get_test_env(jw, uri)
 
         for item in items.testitems
+            textfile = JuliaWorkspaces.get_text_file(jw, uri)
+            line, column = JuliaWorkspaces.position_at(textfile.content, item.code_range.start)
             push!(testitems, (
                 uri=uri,
-                code=JuliaWorkspaces.get_text_file(jw, uri).content.content[item.code_range],
+                line=line,
+                column=column,
+                code=textfile.content.content[item.code_range],
                 env=project_details,
                 detail=item),
             )

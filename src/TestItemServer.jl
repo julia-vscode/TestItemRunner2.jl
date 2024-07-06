@@ -156,7 +156,7 @@ function run_testitem_handler(conn, params::TestserverRunTestitemRequestParams)
                         "The specified testsetup $i does not exist.",
                         Location(
                             params.uri,
-                            Range(Position(params.line, 0), Position(params.line, 0))
+                            Range(Position(params.line, 1), Position(params.line, 1))
                         )
                     )
                 ],
@@ -171,7 +171,7 @@ function run_testitem_handler(conn, params::TestserverRunTestitemRequestParams)
         if setup_details.kind==:module && !setup_details.evaled
             mod = Core.eval(Main.Testsetups, :(module $(Symbol(i)) end))
 
-            code = string('\n'^setup_details.line, ' '^setup_details.column, setup_details.code)
+            code = string('\n'^(setup_details.line-1), ' '^(setup_details.column-1), setup_details.code)
 
             filepath = uri2filepath(setup_details.uri)
 
@@ -204,7 +204,7 @@ function run_testitem_handler(conn, params::TestserverRunTestitemRequestParams)
                             error_message,
                             Location(
                                 isabspath(error_filepath) ? filepath2uri(error_filepath) : "",
-                                Range(Position(max(0, error_line - 1), 0), Position(max(0, error_line - 1), 0))
+                                Range(Position(max(1, error_line), 1), Position(max(1, error_line), 1))
                             )
                         )
                     ],
@@ -228,7 +228,7 @@ function run_testitem_handler(conn, params::TestserverRunTestitemRequestParams)
                         "Unable to load the `Test` package. Please ensure that `Test` is listed as a test dependency in the Project.toml for the package.",
                         Location(
                             params.uri,
-                            Range(Position(params.line, 0), Position(params.line, 0))
+                            Range(Position(params.line, 1), Position(params.line, 1))
                         )
                     )
                 ],
@@ -257,7 +257,7 @@ function run_testitem_handler(conn, params::TestserverRunTestitemRequestParams)
                             error_message,
                             Location(
                                 params.uri,
-                                Range(Position(params.line, 0), Position(params.line, 0))
+                                Range(Position(params.line, 1), Position(params.line, 1))
                             )
                         )
                     ],
@@ -276,7 +276,7 @@ function run_testitem_handler(conn, params::TestserverRunTestitemRequestParams)
                 Core.eval(mod, :(using ..Testsetups: $(Symbol(i))))
             elseif testsetup_details.kind==:snippet
                 testsnippet_filepath = uri2filepath(testsetup_details.uri)
-                testsnippet_code = string('\n'^testsetup_details.line, ' '^testsetup_details.column, testsetup_details.code)
+                testsnippet_code = string('\n'^(testsetup_details.line-1), ' '^(testsetup_details.column-1), testsetup_details.code)
 
                 withpath(testsnippet_filepath) do
                     if params.mode == "Debug"
@@ -303,7 +303,7 @@ function run_testitem_handler(conn, params::TestserverRunTestitemRequestParams)
                         "Unable to load the `$i` testsetup.",
                         Location(
                             params.uri,
-                            Range(Position(params.line, 0), Position(params.line, 0))
+                            Range(Position(params.line, 1), Position(params.line, 1))
                         )
                     )
                 ],
@@ -315,7 +315,7 @@ function run_testitem_handler(conn, params::TestserverRunTestitemRequestParams)
 
     filepath = uri2filepath(params.uri)
 
-    code = string('\n'^params.line, ' '^params.column, params.code)
+    code = string('\n'^(params.line-1), ' '^(params.column-1), params.code)
 
     ts = Test.DefaultTestSet("$filepath:$(params.name)")
 
@@ -365,7 +365,7 @@ function run_testitem_handler(conn, params::TestserverRunTestitemRequestParams)
                     error_message,
                     Location(
                         isabspath(error_filepath) ? filepath2uri(error_filepath) : "",
-                        Range(Position(max(0, error_line - 1), 0), Position(max(0, error_line - 1), 0))
+                        Range(Position(max(1, error_line), 1), Position(max(1, error_line), 1))
                     )
                 )
             ],
@@ -401,7 +401,7 @@ function create_test_message_for_failed(i)
     return TestMessage(sprint(Base.show, i),
         expected,
         actual,
-        Location(filepath2uri(string(i.source.file)), Range(Position(i.source.line - 1, 0), Position(i.source.line - 1, 0))))
+        Location(filepath2uri(string(i.source.file)), Range(Position(i.source.line, 1), Position(i.source.line, 1))))
 end
 
 function extract_expected_and_actual(result)

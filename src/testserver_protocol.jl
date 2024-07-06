@@ -55,6 +55,7 @@ end
 
 @dict_readable struct TestsetupDetails <: JSONRPC.Outbound
     name::String
+    kind::String
     uri::String
     line::Int
     column::Int

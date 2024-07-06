@@ -10,9 +10,19 @@ include("testserver_protocol.jl")
 include("helper.jl")
 include("vscode_testset.jl")
 
+mutable struct Testsetup
+    name::String
+    kind::Symbol
+    uri::String
+    line::Int
+    column::Int
+    code::String
+    evaled::Bool
+end
+
 const conn_endpoint = Ref{Union{Nothing,JSONRPC.JSONRPCEndpoint}}(nothing)
 const DEBUG_SESSION = Ref{Channel{DebugAdapter.DebugSession}}()
-const TESTSETUPS = Dict{Symbol,Any}()
+const TESTSETUPS = Dict{Symbol,Testsetup}()
 
 function __init__()
     DEBUG_SESSION[] = Channel{DebugAdapter.DebugSession}(1)
@@ -33,13 +43,14 @@ function run_update_testsetups(conn, params::TestserverUpdateTestsetupsRequestPa
     for i in params.testsetups
         # We only add new if not there before or if the code changed
         if !haskey(TESTSETUPS, i.name) || (haskey(TESTSETUPS, i.name) && TESTSETUPS[i.name].code != i.code)
-                TESTSETUPS[Symbol(i.name)] = (
-                    name = i.name,
-                    uri = i.uri,
-                    line = i.line,
-                    column = i.column,
-                    code = i.code,
-                    evaled = false
+                TESTSETUPS[Symbol(i.name)] = Testsetup(
+                    i.name,
+                    Symbol(i.kind),
+                    i.uri,
+                    i.line,
+                    i.column,
+                    i.code,
+                    false
                 )
         end
     end
@@ -157,7 +168,7 @@ function run_testitem_handler(conn, params::TestserverRunTestitemRequestParams)
 
         setup_details = TESTSETUPS[Symbol(i)]
 
-        if !setup_details.evaled
+        if setup_details.kind==:module && !setup_details.evaled
             mod = Core.eval(Main.Testsetups, :(module $(Symbol(i)) end))
 
             code = string('\n'^setup_details.line, ' '^setup_details.column, setup_details.code)
@@ -169,6 +180,7 @@ function run_testitem_handler(conn, params::TestserverRunTestitemRequestParams)
                 withpath(filepath) do
                     Base.invokelatest(include_string, mod, code, filepath)
                 end
+                setup_details.evaled = true
             catch err
                 elapsed_time = (time_ns() - t0) / 1e6 # Convert to milliseconds
 
@@ -257,9 +269,33 @@ function run_testitem_handler(conn, params::TestserverRunTestitemRequestParams)
     end
 
     for i in params.testsetups
+        testsetup_details = TESTSETUPS[Symbol(i)]
+
         try
-            Core.eval(mod, :(using ..Testsetups: $(Symbol(i))))
-        catch
+            if testsetup_details.kind==:module
+                Core.eval(mod, :(using ..Testsetups: $(Symbol(i))))
+            elseif testsetup_details.kind==:snippet
+                testsnippet_filepath = uri2filepath(testsetup_details.uri)
+                testsnippet_code = string('\n'^testsetup_details.line, ' '^testsetup_details.column, testsetup_details.code)
+
+                withpath(testsnippet_filepath) do
+                    if params.mode == "Debug"
+                        debug_session = wait_for_debug_session()
+                        DebugAdapter.debug_code(debug_session, mod, testsnippet_code, testsnippet_filepath, false)
+                    else
+                        params.mode == "Coverage" && clear_coverage_data()
+                        try
+                            Base.invokelatest(include_string, mod, testsnippet_code, testsnippet_filepath)
+                        finally
+                            params.mode == "Coverage" && collect_coverage_data!(coverage_results, params.coverageRoots)
+                        end
+                    end
+                end
+            else
+                error("Unknown testsetup kind $(i.kind).")
+            end
+        catch err
+            Base.display_error(err, catch_backtrace())
             return TestserverRunTestitemRequestParamsReturn(
                 "errored",
                 [

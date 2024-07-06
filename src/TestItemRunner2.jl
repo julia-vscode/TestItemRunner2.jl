@@ -190,8 +190,8 @@ function execute_test(test_process, testitem, testsetups, timeout)
                 testitem.env.package_name,
                 testitem.detail.option_default_imports,
                 convert(Vector{String}, string.(testitem.detail.option_setup)),
-                testitem.line,
-                testitem.column,
+                testitem.line-1,
+                testitem.column-1,
                 testitem.code,
                 "Normal",
                 missing

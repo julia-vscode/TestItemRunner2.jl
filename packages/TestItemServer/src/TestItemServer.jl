@@ -209,6 +209,7 @@ function run_testitem_handler(conn, params::TestserverRunTestitemRequestParams)
         try
             Core.eval(mod, :(using Test))
         catch
+            println("IS THIS WherE thinGS GO WRONG???")
             return TestserverRunTestitemRequestParamsReturn(
                 "errored",
                 [

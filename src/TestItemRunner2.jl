@@ -171,14 +171,7 @@ function execute_test(test_process, testitem, testsetups, timeout)
         JSONRPC.send(
             test_process.connection,
             testserver_update_testsetups_type,
-            TestserverUpdateTestsetupsRequestParams([TestsetupDetails(
-                string(k),
-                string(v.detail.uri),
-                # TODO use proper location info here
-                1,
-                1,
-                v.code
-            ) for (k,v) in testsetups])
+            TestserverUpdateTestsetupsRequestParams(testsetups)
         )
 
         result = JSONRPC.send(
@@ -261,13 +254,14 @@ function run_tests(path; filter=nothing, verbose=false, max_workers::Int=Sys.CPU
     #     testsetups_in_package[i.name] = (detail=i, code=get_text(jw._text_documents[i.uri])[i.code_range])
     # end
 
-    # Flat list of @testitems
+    # Flat list of @testitems and @testmodule and @testsnippet
     testitems = []
+    testsetups = []
     for (uri, items) in pairs(JuliaWorkspaces.get_test_items(jw))
         project_details = JuliaWorkspaces.get_test_env(jw, uri)
+        textfile = JuliaWorkspaces.get_text_file(jw, uri)
 
-        for item in items.testitems
-            textfile = JuliaWorkspaces.get_text_file(jw, uri)
+        for item in items.testitems            
             line, column = JuliaWorkspaces.position_at(textfile.content, item.code_range.start)
             push!(testitems, (
                 uri=uri,
@@ -276,6 +270,20 @@ function run_tests(path; filter=nothing, verbose=false, max_workers::Int=Sys.CPU
                 code=textfile.content.content[item.code_range],
                 env=project_details,
                 detail=item),
+            )
+        end
+
+        for item in items.testsetups
+            line, column = JuliaWorkspaces.position_at(textfile.content, item.code_range.start)
+            push!(testsetups,
+                TestsetupDetails(
+                    string(item.name),
+                    string(item.kind),
+                    string(uri),
+                    line,
+                    column,
+                    textfile.content.content[item.code_range]
+                )
             )
         end
     end
@@ -300,7 +308,7 @@ function run_tests(path; filter=nothing, verbose=false, max_workers::Int=Sys.CPU
     for testitem in testitems, environment in environments
         test_process = get_free_testprocess(testitem, environment, max_workers)
 
-        result_channel = execute_test(test_process, testitem, get(()->Dict{Symbol,Any}(), testsetups, testitem.env.package_uri), timeout)
+        result_channel = execute_test(test_process, testitem, testsetups, timeout)
 
         progress_reported_channel = Channel(1)
 

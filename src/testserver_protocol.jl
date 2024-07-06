@@ -1,4 +1,4 @@
-@dict_readable struct Position
+@dict_readable struct Position <: JSONRPC.Outbound
     line::Int
     character::Int
 end
@@ -14,12 +14,12 @@ function JSON.lower(a::Range)
     Dict("start" => a.start, "end" => a.stop)
 end
 
-@dict_readable struct Location
+@dict_readable struct Location <: JSONRPC.Outbound
     uri::String
     range::Range
 end
 
-@dict_readable struct TestMessage
+@dict_readable struct TestMessage <: JSONRPC.Outbound
     message::String
     expectedOutput::Union{String,Missing}
     actualOutput::Union{String,Missing}
@@ -28,7 +28,7 @@ end
 
 TestMessage(message, location) = TestMessage(message, missing, missing, location)
 
-JSONRPC.@dict_readable struct TestserverRunTestitemRequestParams <: JSONRPC.Outbound
+@dict_readable struct TestserverRunTestitemRequestParams <: JSONRPC.Outbound
     uri::String
     name::String
     packageName::String
@@ -41,19 +41,19 @@ JSONRPC.@dict_readable struct TestserverRunTestitemRequestParams <: JSONRPC.Outb
     coverageRoots::Union{Vector{String},Missing}
 end
 
-JSONRPC.@dict_readable struct FileCoverage <: JSONRPC.Outbound
+@dict_readable struct FileCoverage <: JSONRPC.Outbound
     uri::String
     coverage::Vector{Union{Int,Nothing}}
 end
 
-JSONRPC.@dict_readable struct TestserverRunTestitemRequestParamsReturn <: JSONRPC.Outbound
+@dict_readable struct TestserverRunTestitemRequestParamsReturn <: JSONRPC.Outbound
     status::String
     message::Union{Vector{TestMessage},Missing}
     duration::Union{Float64,Missing}
     coverage::Union{Missing,Vector{FileCoverage}}
 end
 
-JSONRPC.@dict_readable struct TestsetupDetails <: JSONRPC.Outbound
+@dict_readable struct TestsetupDetails <: JSONRPC.Outbound
     name::String
     uri::String
     line::Int
@@ -61,7 +61,7 @@ JSONRPC.@dict_readable struct TestsetupDetails <: JSONRPC.Outbound
     code::String
 end
 
-JSONRPC.@dict_readable struct TestserverUpdateTestsetupsRequestParams <: JSONRPC.Outbound
+@dict_readable struct TestserverUpdateTestsetupsRequestParams <: JSONRPC.Outbound
     testsetups::Vector{TestsetupDetails}
 end
 

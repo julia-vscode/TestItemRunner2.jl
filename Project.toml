@@ -24,7 +24,7 @@ Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 [compat]
 julia = "1"
 AutoHashEquals = "1,2"
-JuliaWorkspaces = "3"
+JuliaWorkspaces = "4"
 JSON = "0.21"
 JSONRPC = "1.3.6"
 ProgressMeter = "1.7"

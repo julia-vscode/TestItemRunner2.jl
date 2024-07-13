@@ -395,7 +395,6 @@ function run_tests(
                 if i.result.message!==missing                
                     for j in i.result.message
                         println("  at $(uri2filepath(URI(j.location.uri))):$(j.location.range.start.line)")
-                        # println(fieldnames(typeof(j)))
                         println("    ", replace(j.message, "\n"=>"\n    "))
                     end
                 end

@@ -28,6 +28,7 @@ end
 
 @auto_hash_equals struct TestEnvironment
     name::String
+    coverage::Bool
     env::Dict{String,String}
 end
 
@@ -58,7 +59,7 @@ function launch_new_process(testitem, environment)
     jl_process = open(
         pipeline(
             addenv(
-                Cmd(`julia --startup-file=no --history-file=no --depwarn=no $testserver_script $pipe_name $(key.project_uri===nothing ? "" : uri2filepath(key.project_uri)) $(uri2filepath(key.package_uri)) $(key.package_name)`),
+                Cmd(`julia --code-coverage=$(environment.coverage ? "user" : "none") --startup-file=no --history-file=no --depwarn=no $testserver_script $pipe_name $(key.project_uri===nothing ? "" : uri2filepath(key.project_uri)) $(uri2filepath(key.package_uri)) $(key.package_name)`),
                 environment.env
             ),
             stdout = buffer_out,
@@ -234,7 +235,7 @@ function run_tests(
             print_failed_results=true,
             print_summary=true,
             progress_ui=:bar,
-            environments=[TestEnvironment("Default", Dict{String,String}())]
+            environments=[TestEnvironment("Default", false, Dict{String,String}())]
         )
     jw = JuliaWorkspaces.workspace_from_folders(([path]))
 
@@ -350,7 +351,7 @@ function run_tests(
             )
 
             if progress_ui==:log
-                println("$(res.status=="passed" ? "✓" : "✗") $(environment.name) $(uri2filepath(testitem.uri)):$(testitem.detail.name) → $(res.status) ($(res.duration) ms)")
+                println("$(res.status=="passed" ? "✓" : "✗") $(environment.name) $(uri2filepath(testitem.uri)):$(testitem.detail.name) → $(res.status) ($(res.duration)ms)")
             end
 
             push!(progress_reported_channel, true)

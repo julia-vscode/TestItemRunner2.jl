@@ -350,7 +350,7 @@ function run_tests(
             )
 
             if progress_ui==:log
-                println("$(res.status=="passed" ? "✓" : "✗") $(environment.name) $(uri2filepath(testitem.uri)):$(testitem.detail.name) → $(res.status)")
+                println("$(res.status=="passed" ? "✓" : "✗") $(environment.name) $(uri2filepath(testitem.uri)):$(testitem.detail.name) → $(res.status) ($(res.duration) ms)")
             end
 
             push!(progress_reported_channel, true)
@@ -358,7 +358,7 @@ function run_tests(
             Base.display_error(err, catch_backtrace())
         end
 
-        push!(executed_testitems, (testitem=testitem, result=result_channel, progress_reported_channel=progress_reported_channel))
+        push!(executed_testitems, (testitem=testitem, testenvironment=environment, result=result_channel, progress_reported_channel=progress_reported_channel))
     end
 
     yield()
@@ -367,7 +367,7 @@ function run_tests(
         wait(i.result)
     end
 
-    responses = [(testitem=i.testitem, result=take!(i.result)) for i in executed_testitems]
+    responses = [(testitem=i.testitem, testenvironment=i.testenvironment, result=take!(i.result)) for i in executed_testitems]
 
     if print_failed_results
         for i in responses

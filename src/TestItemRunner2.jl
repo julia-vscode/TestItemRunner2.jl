@@ -407,7 +407,7 @@ function run_tests(
     end
 
     if return_results
-        return (definition_errors=testerrors, results=responses)
+        return (definition_errors=testerrors, test_results=responses)
     else
         return nothing
     end

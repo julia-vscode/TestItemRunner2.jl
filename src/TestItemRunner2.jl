@@ -224,7 +224,18 @@ function execute_test(test_process, testitem, testsetups, timeout)
     return return_value
 end
 
-function run_tests(path; filter=nothing, verbose=false, max_workers::Int=Sys.CPU_THREADS, timeout=60*5, return_results=false, print_failed_results=true, environments=[TestEnvironment("Default", Dict{String,String}())])
+function run_tests(
+            path;
+            filter=nothing,
+            verbose=false,
+            max_workers::Int=Sys.CPU_THREADS,
+            timeout=60*5,
+            return_results=false,
+            print_failed_results=true,
+            print_summary=true,
+            progress_ui=:bar,
+            environments=[TestEnvironment("Default", Dict{String,String}())]
+        )
     jw = JuliaWorkspaces.workspace_from_folders(([path]))
 
     # TODO Reenable
@@ -297,7 +308,7 @@ function run_tests(path; filter=nothing, verbose=false, max_workers::Int=Sys.CPU
 
     executed_testitems = []
 
-    p = ProgressMeter.Progress(length(testitems)*length(environments), barlen=50)
+    p = ProgressMeter.Progress(length(testitems)*length(environments), barlen=50, enabled=progress_ui==:bar)
 
     count_success = 0
     count_timeout = 0
@@ -337,6 +348,11 @@ function run_tests(path; filter=nothing, verbose=false, max_workers::Int=Sys.CPU
                     ((Symbol("Number of processes for package '$(i.first.package_name)'"), length(i.second)) for i in TEST_PROCESSES)...
                 ]
             )
+
+            if progress_ui==:log
+                println("$(res.status=="passed" ? "✓" : "✗") $(environment.name) $(uri2filepath(testitem.uri)):$(testitem.detail.name) → $(res.status)")
+            end
+
             push!(progress_reported_channel, true)
         catch err
             Base.display_error(err, catch_backtrace())
@@ -370,7 +386,10 @@ function run_tests(path; filter=nothing, verbose=false, max_workers::Int=Sys.CPU
         wait(i.progress_reported_channel)
     end
 
-    println("$(length(responses)) tests ran, $(count_success) passed, $(count_fail) failed, $(count_error) errored, $(count_timeout) timed out.")
+    if print_summary
+        println()
+        println("$(length(responses)) tests ran, $(count_success) passed, $(count_fail) failed, $(count_error) errored, $(count_timeout) timed out.")
+    end
 
     if return_results
         return responses

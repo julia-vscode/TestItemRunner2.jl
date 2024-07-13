@@ -231,6 +231,7 @@ function run_tests(
             verbose=false,
             max_workers::Int=Sys.CPU_THREADS,
             timeout=60*5,
+            fail_on_detection_error=true,
             return_results=false,
             print_failed_results=true,
             print_summary=true,
@@ -238,37 +239,11 @@ function run_tests(
             environments=[TestEnvironment("Default", false, Dict{String,String}())]
         )
     jw = JuliaWorkspaces.workspace_from_folders(([path]))
-
-    # TODO Reenable
-    # if count(i -> true, Iterators.flatten(values(jw._testerrors))) > 0
-    #     println("There are errors in your test definitions, we are aborting.")
-
-    #     for te in Iterators.flatten(values(jw._testerrors))
-    #         pos = JuliaWorkspaces.get_position_from_offset(jw._text_documents[te.uri], te.range[1])
-    #         println()
-    #         println("File: $(uri2filepath(te.uri)):$(pos[1]+1)")
-    #         println()
-    #         println(te.message)
-    #         println()
-    #     end
-
-    #     return nothing
-    # end
-
-    # testsetups maps @testsetup PACKAGE => NAME => TESTSETUPdetail
-    testsetups = Dict{JuliaWorkspaces.URIs2.URI,Dict{Symbol,Any}}()
-    # TODO Reenable
-    # for i in Iterators.flatten(values(jw._testsetups))
-    #     testsetups_in_package = get!(() -> Dict{Symbol,Any}(), testsetups, i.package_uri)
-
-    #     haskey(testsetups_in_package, i.name) && error("The name '$(i.name)' is used for more than one test setup.")
-
-    #     testsetups_in_package[i.name] = (detail=i, code=get_text(jw._text_documents[i.uri])[i.code_range])
-    # end
-
+    
     # Flat list of @testitems and @testmodule and @testsnippet
     testitems = []
     testsetups = []
+    testerrors = []
     for (uri, items) in pairs(JuliaWorkspaces.get_test_items(jw))
         project_details = JuliaWorkspaces.get_test_env(jw, uri)
         textfile = JuliaWorkspaces.get_text_file(jw, uri)
@@ -298,87 +273,132 @@ function run_tests(
                 )
             )
         end
+
+        for item in items.testerrors
+            line, column = JuliaWorkspaces.position_at(textfile.content, item.range.start)
+            push!(testerrors,
+                (
+                    uri=string(uri),
+                    line=line,
+                    column=column,
+                    message=item.message
+                )
+            )
+        end
     end
-
-    # testitems = [(detail=i, code=get_text(jw._text_documents[i.uri])[i.code_range]) for i in Iterators.flatten(values(jw._testitems))]   
-
-    # Filter @testitems
-    if filter !== nothing
-        filter!(i->filter((filename=uri2filepath(i.uri), name=i.detail.name, tags=i.detail.option_tags, package_name=i.detail.package_name)), testitems)
-    end
-
-    executed_testitems = []
-
-    p = ProgressMeter.Progress(length(testitems)*length(environments), barlen=50, enabled=progress_ui==:bar)
 
     count_success = 0
     count_timeout = 0
     count_fail = 0
     count_error = 0
 
-    # Loop over all test items that should be executed
-    for testitem in testitems, environment in environments
-        test_process = get_free_testprocess(testitem, environment, max_workers)
+    responses = []
+    executed_testitems = []
 
-        result_channel = execute_test(test_process, testitem, testsetups, timeout)
-
-        progress_reported_channel = Channel(1)
-
-        @async try
-            res = fetch(result_channel)
-
-            if res.status=="passed"
-                count_success += 1
-            elseif res.status=="timeout"
-                count_timeout += 1
-            elseif res.status == "failed"
-                count_fail += 1
-            elseif res.status == "errored"
-                count_error += 1
-            else
-                error("Unknown test status")
-            end
-
-            ProgressMeter.next!(
-                p,
-                showvalues = [
-                    (Symbol("Successful tests"), count_success),
-                    (Symbol("Failed tests"), count_fail),
-                    (Symbol("Errored tests"), count_error),
-                    (Symbol("Timed out tests"), count_timeout),
-                    ((Symbol("Number of processes for package '$(i.first.package_name)'"), length(i.second)) for i in TEST_PROCESSES)...
-                ]
-            )
-
-            if progress_ui==:log
-                println("$(res.status=="passed" ? "✓" : "✗") $(environment.name) $(uri2filepath(testitem.uri)):$(testitem.detail.name) → $(res.status) ($(res.duration)ms)")
-            end
-
-            push!(progress_reported_channel, true)
-        catch err
-            Base.display_error(err, catch_backtrace())
+    if length(testerrors) == 0  || fail_on_detection_error==false
+        # Filter @testitems
+        if filter !== nothing
+            filter!(i->filter((filename=uri2filepath(i.uri), name=i.detail.name, tags=i.detail.option_tags, package_name=i.detail.package_name)), testitems)
         end
 
-        push!(executed_testitems, (testitem=testitem, testenvironment=environment, result=result_channel, progress_reported_channel=progress_reported_channel))
+        p = ProgressMeter.Progress(length(testitems)*length(environments), barlen=50, enabled=progress_ui==:bar)
+
+        # Loop over all test items that should be executed
+        for testitem in testitems, environment in environments
+            test_process = get_free_testprocess(testitem, environment, max_workers)
+
+            result_channel = execute_test(test_process, testitem, testsetups, timeout)
+
+            progress_reported_channel = Channel(1)
+
+            @async try
+                res = fetch(result_channel)
+
+                if res.status=="passed"
+                    count_success += 1
+                elseif res.status=="timeout"
+                    count_timeout += 1
+                elseif res.status == "failed"
+                    count_fail += 1
+                elseif res.status == "errored"
+                    count_error += 1
+                else
+                    error("Unknown test status")
+                end
+
+                ProgressMeter.next!(
+                    p,
+                    showvalues = [
+                        (Symbol("Successful tests"), count_success),
+                        (Symbol("Failed tests"), count_fail),
+                        (Symbol("Errored tests"), count_error),
+                        (Symbol("Timed out tests"), count_timeout),
+                        ((Symbol("Number of processes for package '$(i.first.package_name)'"), length(i.second)) for i in TEST_PROCESSES)...
+                    ]
+                )
+
+                if progress_ui==:log
+                    println("$(res.status=="passed" ? "✓" : "✗") $(environment.name) $(uri2filepath(testitem.uri)):$(testitem.detail.name) → $(res.status) ($(res.duration)ms)")
+                end
+
+                push!(progress_reported_channel, true)
+            catch err
+                Base.display_error(err, catch_backtrace())
+            end
+
+            push!(executed_testitems, (testitem=testitem, testenvironment=environment, result=result_channel, progress_reported_channel=progress_reported_channel))
+        end
+
+        yield()
+
+        for i in executed_testitems
+            wait(i.result)
+        end
+
+        append!(responses, (testitem=i.testitem, testenvironment=i.testenvironment, result=take!(i.result)) for i in executed_testitems)
     end
 
-    yield()
+    if print_summary
+        summaries = String[]
 
-    for i in executed_testitems
-        wait(i.result)
+        if length(testerrors)>0
+            push!(summaries, "$(length(testerrors)) definition error$(ifelse(length(testerrors)==1,"", "s"))")
+        end
+
+        push!(summaries, "$(length(responses)) tests ran")
+        push!(summaries, "$(count_success) passed")
+        push!(summaries, "$(count_fail) failed")
+        push!(summaries, "$(count_error) errored")
+        push!(summaries, "$(count_timeout) timed out")
+
+        println()
+        println(join(summaries, ", "), ".")
     end
-
-    responses = [(testitem=i.testitem, testenvironment=i.testenvironment, result=take!(i.result)) for i in executed_testitems]
 
     if print_failed_results
+        for te in testerrors
+            println()
+            println("Definition error at $(uri2filepath(URI(te.uri))):$(te.line)")
+            println("  $(te.message)")
+        end
+    
         for i in responses
-            if i.result.status in ("failed", "errored") && i.result.message!==missing                
+            if i.result.status in ("failed", "errored") 
                 println()
-                println("Errors for test $(i.testitem.detail.name)")
-                for j in i.result.message
-                    println(j.message)
+
+                if i.result.status == "failed"
+                    println("Test failure in $(uri2filepath(URI(i.testitem.uri))):$(i.testitem.detail.name)")
+                elseif i.result.status == "errored"
+                    println("Test error in $(uri2filepath(URI(i.testitem.uri))):$(i.testitem.detail.name)")
                 end
-                println()
+
+                if i.result.message!==missing                
+                    for j in i.result.message
+                        println("  at $(uri2filepath(URI(j.location.uri))):$(j.location.range.start.line)")
+                        # println(fieldnames(typeof(j)))
+                        println("    ", replace(j.message, "\n"=>"\n    "))
+                    end
+                end
             end
         end
     end
@@ -387,13 +407,8 @@ function run_tests(
         wait(i.progress_reported_channel)
     end
 
-    if print_summary
-        println()
-        println("$(length(responses)) tests ran, $(count_success) passed, $(count_fail) failed, $(count_error) errored, $(count_timeout) timed out.")
-    end
-
     if return_results
-        return responses
+        return (definition_errors=testerrors, results=responses)
     else
         return nothing
     end

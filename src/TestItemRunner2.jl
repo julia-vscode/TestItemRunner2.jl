@@ -1,6 +1,6 @@
 module TestItemRunner2
 
-export run_tests, kill_test_processes, TestEnvironment
+export run_tests, kill_test_processes, TestEnvironment, print_process_diag
 
 # For easier dev, switch these two lines
 const pkg_root = "../packages"
@@ -410,6 +410,17 @@ function run_tests(
         return (definition_errors=testerrors, test_results=responses)
     else
         return nothing
+    end
+end
+
+function  print_process_diag()
+    for (k,v) in pairs(TEST_PROCESSES)
+        println()
+        println("$(length(v)) processes with")
+        println("  project_uri: $(k.project_uri)")
+        println("  package_uri: $(k.package_uri)")
+        println("  package_name: $(k.package_name)")
+        println("  env name: $(k.environment.name)")
     end
 end
 

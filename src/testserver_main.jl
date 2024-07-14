@@ -5,6 +5,8 @@ popfirst!(LOAD_PATH)
 import Sockets
 
 try
+    println("THE ARGS2 THING IS $(ARGS[2])")
+    println("IS IT A DIR? $(isdir(ARGS[2]))")
     if isdir(ARGS[2])
         c = read(joinpath(ARGS[2], "Manifest.toml"), String)
         println("MANIFEST CONTENT")

@@ -44,6 +44,24 @@ function get_key_from_testitem(testitem, environment)
     )
 end
 
+function precompil_test_env(environment, test_env)
+    precompile_script = joinpath(@__DIR__, "precompile_main.jl")
+
+    buffer_out = IOBuffer()
+    buffer_err = IOBuffer()
+
+    run(
+        pipeline(
+            addenv(
+                Cmd(`julia --code-coverage=$(test_env.coverage ? "user" : "none") --startup-file=no --history-file=no --depwarn=no $precompile_script $(environment.project_uri===nothing ? "" : uri2filepath(environment.project_uri)) $(uri2filepath(environment.package_uri)) $(environment.package_name)`),
+                test_env.env
+            ),
+            # stdout = buffer_out,
+            # stderr = buffer_err
+        )
+    )
+end
+
 function launch_new_process(testitem, environment)
     key = get_key_from_testitem(testitem, environment)
 
@@ -113,6 +131,8 @@ function get_free_testprocess(testitem, environment, max_num_processes)
     key = get_key_from_testitem(testitem, environment)
 
     if !haskey(TEST_PROCESSES, key)
+        precompil_test_env(testitem.env, environment)
+
         return launch_new_process(testitem, environment)
     else
         test_processes = TEST_PROCESSES[key]

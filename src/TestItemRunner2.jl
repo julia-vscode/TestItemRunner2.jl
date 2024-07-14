@@ -197,9 +197,14 @@ function execute_test(test_process, testitem, testsetups, timeout)
                 )
             )
         catch err
-            if err isa InvalidStateException && timed_out
-                msg = TestMessage("The test timed out", missing, missing, Location(string(testitem.detail.uri), Range(Position(testitem.line, testitem.column), Position(testitem.line, testitem.column))))
-                result = (status = "timeout", message = [msg], duration = missing)
+            if err isa InvalidStateException
+                if timed_out
+                    msg = TestMessage("The test timed out", missing, missing, Location(string(testitem.detail.uri), Range(Position(testitem.line, testitem.column), Position(testitem.line, testitem.column))))
+                    result = (status = "timeout", message = [msg], duration = missing)
+                else
+                    msg = TestMessage("The test process crashed", missing, missing, Location(string(testitem.detail.uri), Range(Position(testitem.line, testitem.column), Position(testitem.line, testitem.column))))
+                    result = (status = "crash", message = [msg], duration = missing)
+                end
             else
                 rethrow()
             end            
@@ -298,6 +303,7 @@ function run_tests(
     count_timeout = 0
     count_fail = 0
     count_error = 0
+    count_crash = 0
 
     responses = []
     executed_testitems = []
@@ -329,6 +335,8 @@ function run_tests(
                     count_fail += 1
                 elseif res.status == "errored"
                     count_error += 1
+                elseif res.status == "crash"
+                    count_crash += 1
                 else
                     error("Unknown test status")
                 end
@@ -340,6 +348,7 @@ function run_tests(
                             (Symbol("Successful tests"), count_success),
                             (Symbol("Failed tests"), count_fail),
                             (Symbol("Errored tests"), count_error),
+                            (Symbol("Crashed tests"), count_crash),
                             (Symbol("Timed out tests"), count_timeout),
                             ((Symbol("Number of processes for package '$(i.first.package_name)'"), length(i.second)) for i in TEST_PROCESSES)...
                         ]
@@ -379,6 +388,7 @@ function run_tests(
         push!(summaries, "$(count_success) passed")
         push!(summaries, "$(count_fail) failed")
         push!(summaries, "$(count_error) errored")
+        push!(summaries, "$(count_crash) crashed")
         push!(summaries, "$(count_timeout) timed out")
 
         println()
@@ -393,7 +403,7 @@ function run_tests(
         end
     
         for i in responses
-            if i.result.status in ("failed", "errored") 
+            if i.result.status in ("failed", "errored", "crashed") 
                 println()
 
                 if i.result.status == "failed"
@@ -407,6 +417,13 @@ function run_tests(
                         println("  at $(uri2filepath(URI(j.location.uri))):$(j.location.range.start.line)")
                         println("    ", replace(j.message, "\n"=>"\n    "))
                     end
+                end
+
+                if i.result.status == "crash"
+                    println("    stdout log:")
+                    println("      ", replace(i.result.log_out, "\n"=>"\n      "))
+                    println("    stderr log:")
+                    println("      ", replace(i.result.log_err, "\n"=>"\n      "))
                 end
             end
         end

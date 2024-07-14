@@ -403,7 +403,7 @@ function run_tests(
         end
     
         for i in responses
-            if i.result.status in ("failed", "errored", "crashed") 
+            if i.result.status in ("failed", "errored", "crash") 
                 println()
 
                 if i.result.status == "failed"

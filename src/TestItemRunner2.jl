@@ -29,7 +29,7 @@ end
 @auto_hash_equals struct TestEnvironment
     name::String
     coverage::Bool
-    env::Dict{String,String}
+    env::Dict{String,Any}
 end
 
 const TEST_PROCESSES = Dict{NamedTuple{(:project_uri,:package_uri,:package_name,:environment),Tuple{Union{URI,Nothing},URI,String,TestEnvironment}},Vector{TestProcess}}()
@@ -241,7 +241,7 @@ function run_tests(
             print_failed_results=true,
             print_summary=true,
             progress_ui=:bar,
-            environments=[TestEnvironment("Default", false, Dict{String,String}())]
+            environments=[TestEnvironment("Default", false, Dict{String,Any}())]
         )
     jw = JuliaWorkspaces.workspace_from_folders(([path]))
     

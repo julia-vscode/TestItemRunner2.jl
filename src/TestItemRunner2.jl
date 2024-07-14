@@ -213,7 +213,7 @@ function execute_test(test_process, testitem, testsetups, timeout)
 
                 notify(SOME_TESTITEM_FINISHED)
 
-                push!(return_value, (status="timeout", message="The test timed out", log_out = out_log, log_err = err_log))
+                push!(return_value, (status="timeout", message="The test timed out", duration = missing, log_out = out_log, log_err = err_log))
             catch err2
                 Base.display_error(err2, catch_backtrace())
             end
@@ -340,7 +340,8 @@ function run_tests(
                 end
 
                 if progress_ui==:log
-                    println("$(res.status=="passed" ? "✓" : "✗") $(environment.name) $(uri2filepath(testitem.uri)):$(testitem.detail.name) → $(res.status) ($(res.duration)ms)")
+                    duration_string = res.duration !== missing ? " ($(res.duration)ms)" : ""
+                    println("$(res.status=="passed" ? "✓" : "✗") $(environment.name) $(uri2filepath(testitem.uri)):$(testitem.detail.name) → $(res.status)$duration_string")
                 end
 
                 push!(progress_reported_channel, true)

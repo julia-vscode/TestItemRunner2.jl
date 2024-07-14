@@ -214,6 +214,12 @@ function execute_test(test_process, testitem, testsetups, timeout)
                 println(out_log)
                 println(err_log)
 
+                if isfile("testservererror.txt")
+                    asdf = read("testservererror.txt", String)
+                    println("AND FROM THE ERRORFILE")
+                    println(asdf)
+                end
+
                 notify(SOME_TESTITEM_FINISHED)
 
                 push!(return_value, (status="timeout", message=[TestMessage("The test timed out", missing, missing, Location(string(testitem.detail.uri), Range(Position(testitem.line, testitem.column), Position(testitem.line, testitem.column))))], duration = missing, log_out = out_log, log_err = err_log))

@@ -514,7 +514,7 @@ function serve(pipename, debug_pipename, project_path, package_path, package_nam
             serve_in_env(conn)
         end
     else
-        Pkg.activate(Pkg.PackageSpec(path=project_path))
+        Pkg.activate(project_path)
 
         if package_name!=""
             TestEnv.activate(package_name) do

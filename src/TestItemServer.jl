@@ -413,6 +413,13 @@ function extract_expected_and_actual(result)
                 try
                     expected = unescape_string(m.captures[1])
                     actual = unescape_string(m.captures[2])
+
+                    if expected === nothing
+                        expected = missing
+                    end
+                    if actual ===nothing
+                        actual = missing
+                    end
                     return (expected, actual)
                 catch err
                     # theoretically possible if a user registers a Fail instance that matches
@@ -494,9 +501,14 @@ function serve(pipename, debug_pipename, project_path, package_path, package_nam
 
     @info "This test server instance was started with the following configuration." project_path package_path package_name
     if project_path==""
-        Pkg.activate(temp=true)
+        @static if VERSION >= v"1.5.0"
+            Pkg.activate(temp=true)
+        else
+            temp_path = mktempdir()
+            Pkg.activate(temp_path)
+        end
 
-        Pkg.develop(path=package_path)
+        Pkg.develop(Pkg.PackageSpec(path=package_path))
 
         TestEnv.activate(package_name) do
             serve_in_env(conn)

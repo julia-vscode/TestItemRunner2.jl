@@ -218,13 +218,15 @@ function execute_test(test_process, testitem, testsetups, timeout)
 
         push!(return_value, (status = result.status, message = result.message, duration = result.duration, log_out = out_log, log_err = err_log))
     catch err
-        println("WE HAVE AN ERROR")
-        println("out_log:")
-        println(String(take!(test_process.log_out)))
-        println()
-        println("err_log")
-        println(String(take!(test_process.log_err)))
         Base.display_error(err, catch_backtrace())
+
+        println("child process log_out start")
+        println(String(take!(test_process.log_out)))
+        println("child process log_out end")
+        println()
+        println("child process log_err start")
+        println(String(take!(test_process.log_err)))
+        println("child process log_err start")
     end
 
     return return_value

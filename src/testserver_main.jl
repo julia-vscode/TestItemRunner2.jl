@@ -5,17 +5,10 @@ popfirst!(LOAD_PATH)
 import Sockets
 
 try
-    println("THE ARGS2 THING IS $(ARGS[2])")
-    println("IS IT A DIR? $(isdir(ARGS[2]))")
-    if isdir(ARGS[2])
-        c = read(joinpath(ARGS[2], "Manifest.toml"), String)
-        println("MANIFEST CONTENT")
-        println(c)
-    end
-
     TestItemServer.serve(ARGS[1], nothing, ARGS[2], ARGS[3], ARGS[4])
-
 catch err
+    bt = catch_backtrace()
+    Base.display_error(err, bt)
     open("testservererror.txt", "w") do file
         Base.display_error(file, err,catch_backtrace())
     end

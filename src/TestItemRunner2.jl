@@ -206,7 +206,7 @@ function execute_test(test_process, testitem, testsetups, timeout)
         push!(return_value, (status = result.status, message = result.message, duration = result.duration, log_out = out_log, log_err = err_log))
     catch err
         if err isa InvalidStateException
-            
+            Base.display_error(err, catch_backtrace())
             try
                 out_log = String(take!(test_process.log_out))
                 err_log = String(take!(test_process.log_err))

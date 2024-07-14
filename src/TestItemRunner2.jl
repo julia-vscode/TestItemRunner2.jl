@@ -162,35 +162,48 @@ function execute_test(test_process, testitem, testsetups, timeout)
 
     finished = false
 
+    timed_out = false
+
     timer = timeout>0 ? Timer(timeout) do i
         if !finished
+            timed_out = true
             kill(test_process.process)
         end
     end : nothing
 
     @async try
-        JSONRPC.send(
-            test_process.connection,
-            testserver_update_testsetups_type,
-            TestserverUpdateTestsetupsRequestParams(testsetups)
-        )
-
-        result = JSONRPC.send(
-            test_process.connection,
-            testserver_run_testitem_request_type,
-            TestserverRunTestitemRequestParams(
-                string(testitem.detail.uri),
-                testitem.detail.name,
-                testitem.env.package_name,
-                testitem.detail.option_default_imports,
-                convert(Vector{String}, string.(testitem.detail.option_setup)),
-                testitem.line,
-                testitem.column,
-                testitem.code,
-                "Normal",
-                missing
+        result = nothing
+        try 
+            JSONRPC.send(
+                test_process.connection,
+                testserver_update_testsetups_type,
+                TestserverUpdateTestsetupsRequestParams(testsetups)
             )
-        )
+
+            result = JSONRPC.send(
+                test_process.connection,
+                testserver_run_testitem_request_type,
+                TestserverRunTestitemRequestParams(
+                    string(testitem.detail.uri),
+                    testitem.detail.name,
+                    testitem.env.package_name,
+                    testitem.detail.option_default_imports,
+                    convert(Vector{String}, string.(testitem.detail.option_setup)),
+                    testitem.line,
+                    testitem.column,
+                    testitem.code,
+                    "Normal",
+                    missing
+                )
+            )
+        catch err
+            if err isa InvalidStateException && timed_out
+                msg = TestMessage("The test timed out", missing, missing, Location(string(testitem.detail.uri), Range(Position(testitem.line, testitem.column), Position(testitem.line, testitem.column))))
+                result = (status = "timeout", message = [msg], duration = missing)
+            else
+                rethrow()
+            end            
+        end
 
         out_log = String(take!(test_process.log_out))
         err_log = String(take!(test_process.log_err))
@@ -205,30 +218,13 @@ function execute_test(test_process, testitem, testsetups, timeout)
 
         push!(return_value, (status = result.status, message = result.message, duration = result.duration, log_out = out_log, log_err = err_log))
     catch err
-        if err isa InvalidStateException
-            Base.display_error(err, catch_backtrace())
-            try
-                out_log = String(take!(test_process.log_out))
-                err_log = String(take!(test_process.log_err))
-
-                println(out_log)
-                println(err_log)
-
-                if isfile("testservererror.txt")
-                    asdf = read("testservererror.txt", String)
-                    println("AND FROM THE ERRORFILE")
-                    println(asdf)
-                end
-
-                notify(SOME_TESTITEM_FINISHED)
-
-                push!(return_value, (status="timeout", message=[TestMessage("The test timed out", missing, missing, Location(string(testitem.detail.uri), Range(Position(testitem.line, testitem.column), Position(testitem.line, testitem.column))))], duration = missing, log_out = out_log, log_err = err_log))
-            catch err2
-                Base.display_error(err2, catch_backtrace())
-            end
-        else
-            Base.display_error(err, catch_backtrace())
-        end
+        println("WE HAVE AN ERROR")
+        println("out_log:")
+        println(String(take!(test_process.log_out)))
+        println()
+        println("err_log")
+        println(String(take!(test_process.log_err)))
+        Base.display_error(err, catch_backtrace())
     end
 
     return return_value

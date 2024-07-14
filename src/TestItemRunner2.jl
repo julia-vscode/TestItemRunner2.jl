@@ -298,7 +298,7 @@ function run_tests(
     if length(testerrors) == 0  || fail_on_detection_error==false
         # Filter @testitems
         if filter !== nothing
-            filter!(i->filter((filename=uri2filepath(i.uri), name=i.detail.name, tags=i.detail.option_tags, package_name=i.detail.package_name)), testitems)
+            filter!(i->filter((filename=uri2filepath(i.uri), name=i.detail.name, tags=i.detail.option_tags, package_name=i.env.package_name)), testitems)
         end
 
         p = ProgressMeter.Progress(length(testitems)*length(environments), barlen=50, enabled=progress_ui==:bar)
@@ -326,16 +326,18 @@ function run_tests(
                     error("Unknown test status")
                 end
 
-                ProgressMeter.next!(
-                    p,
-                    showvalues = [
-                        (Symbol("Successful tests"), count_success),
-                        (Symbol("Failed tests"), count_fail),
-                        (Symbol("Errored tests"), count_error),
-                        (Symbol("Timed out tests"), count_timeout),
-                        ((Symbol("Number of processes for package '$(i.first.package_name)'"), length(i.second)) for i in TEST_PROCESSES)...
-                    ]
-                )
+                if progress_ui==:bar
+                    ProgressMeter.next!(
+                        p,
+                        showvalues = [
+                            (Symbol("Successful tests"), count_success),
+                            (Symbol("Failed tests"), count_fail),
+                            (Symbol("Errored tests"), count_error),
+                            (Symbol("Timed out tests"), count_timeout),
+                            ((Symbol("Number of processes for package '$(i.first.package_name)'"), length(i.second)) for i in TEST_PROCESSES)...
+                        ]
+                    )
+                end
 
                 if progress_ui==:log
                     println("$(res.status=="passed" ? "✓" : "✗") $(environment.name) $(uri2filepath(testitem.uri)):$(testitem.detail.name) → $(res.status) ($(res.duration)ms)")

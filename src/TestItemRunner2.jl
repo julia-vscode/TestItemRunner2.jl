@@ -7,6 +7,7 @@ const pkg_root = "../packages"
 # const pkg_root = joinpath(homedir(), ".julia", "dev")
 
 import JSON, JSONRPC, ProgressMeter, TOML, UUIDs, Sockets, JuliaWorkspaces, AutoHashEquals
+using Query
 
 using JSONRPC: @dict_readable
 using JuliaWorkspaces: JuliaWorkspace
@@ -30,6 +31,40 @@ end
     name::String
     coverage::Bool
     env::Dict{String,Any}
+end
+
+struct TestrunResultMessage
+    message::String
+    # expectedOutput::Union{String,Missing}
+    # actualOutput::Union{String,Missing}
+    uri::URI
+    line::Int
+    column::Int
+end
+
+struct TestrunResultTestitemProfile
+    profile_name::String
+    status::Symbol
+    duration::Union{Float64,Missing}
+    messages::Union{Vector{TestrunResultMessage},Missing}
+end
+
+struct TestrunResultTestitem
+    name::String
+    uri::URI
+    profiles::Vector{TestrunResultTestitemProfile}
+end
+
+struct TestrunResultDefinitionError
+    message::String
+    uri::URI
+    line::Int
+    column::Int
+end
+
+struct TestrunResult
+    definition_errors::Vector{TestrunResultDefinitionError}
+    testitems::Vector{TestrunResultTestitem}
 end
 
 const TEST_PROCESSES = Dict{NamedTuple{(:project_uri,:package_uri,:package_name,:environment),Tuple{Union{URI,Nothing},URI,String,TestEnvironment}},Vector{TestProcess}}()
@@ -454,7 +489,18 @@ function run_tests(
     end
 
     if return_results
-        return (definition_errors=testerrors, test_results=responses)
+        duplicated_testitems = TestrunResultTestitem[TestrunResultTestitem(ti.testitem.detail.name, ti.testitem.uri, [TestrunResultTestitemProfile(ti.testenvironment.name, Symbol(ti.result.status), ti.result.duration, ti.result.message===missing ? missing : [TestrunResultMessage(msg.message, URI(msg.location.uri), msg.location.range.start.line, msg.location.range.start.character) for msg in ti.result.message])]) for ti in responses]
+
+        deduplicated_testitems = duplicated_testitems |>
+            @groupby({_.name, _.uri}) |>
+            @map(TestrunResultTestitem(key(_).name, key(_).uri, [_.profiles...;])) |>
+            collect
+
+        typed_results = TestrunResult(
+            TestrunResultDefinitionError[TestrunResultDefinitionError(i.message, URI(i.uri), i.line, i.column) for i in testerrors],
+            deduplicated_testitems
+        )
+        return typed_results
     else
         return nothing
     end

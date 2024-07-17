@@ -257,10 +257,10 @@ function execute_test(test_process, testitem, testsetups, timeout)
             if err isa InvalidStateException
                 if timed_out
                     msg = TestMessage("The test timed out", missing, missing, Location(string(testitem.detail.uri), Range(Position(testitem.line, testitem.column), Position(testitem.line, testitem.column))))
-                    result = (status = "timeout", message = [msg], duration = missing)
+                    result = TestserverRunTestitemRequestParamsReturn("timeout", [msg], missing, missing)
                 else
                     msg = TestMessage("The test process crashed", missing, missing, Location(string(testitem.detail.uri), Range(Position(testitem.line, testitem.column), Position(testitem.line, testitem.column))))
-                    result = (status = "crash", message = [msg], duration = missing)
+                    result = TestserverRunTestitemRequestParamsReturn("crash", [msg], missing, missing)
                 end
             else
                 rethrow()
@@ -278,7 +278,7 @@ function execute_test(test_process, testitem, testsetups, timeout)
 
         notify(SOME_TESTITEM_FINISHED)
 
-        push!(return_value, (status = result.status, message = result.message, duration = result.duration, log_out = out_log, log_err = err_log))
+        push!(return_value, (status = result.status, messages = result.messages, duration = result.duration, log_out = out_log, log_err = err_log))
     catch err
         Base.display_error(err, catch_backtrace())
 
@@ -469,8 +469,8 @@ function run_tests(
                     println("Test error in $(uri2filepath(URI(i.testitem.uri))):$(i.testitem.detail.name)")
                 end
 
-                if i.result.message!==missing                
-                    for j in i.result.message
+                if i.result.messages!==missing                
+                    for j in i.result.messages
                         println("  at $(uri2filepath(URI(j.location.uri))):$(j.location.range.start.line)")
                         println("    ", replace(j.message, "\n"=>"\n    "))
                     end
@@ -491,7 +491,7 @@ function run_tests(
     end
 
     if return_results
-        duplicated_testitems = TestrunResultTestitem[TestrunResultTestitem(ti.testitem.detail.name, ti.testitem.uri, [TestrunResultTestitemProfile(ti.testenvironment.name, Symbol(ti.result.status), ti.result.duration, ti.result.message===missing ? missing : [TestrunResultMessage(msg.message, URI(msg.location.uri), msg.location.range.start.line, msg.location.range.start.character) for msg in ti.result.message])]) for ti in responses]
+        duplicated_testitems = TestrunResultTestitem[TestrunResultTestitem(ti.testitem.detail.name, ti.testitem.uri, [TestrunResultTestitemProfile(ti.testenvironment.name, Symbol(ti.result.status), ti.result.duration, ti.result.messages===missing ? missing : [TestrunResultMessage(msg.message, URI(msg.location.uri), msg.location.range.start.line, msg.location.range.start.character) for msg in ti.result.messages])]) for ti in responses]
 
         deduplicated_testitems = duplicated_testitems |>
             @groupby({_.name, _.uri}) |>

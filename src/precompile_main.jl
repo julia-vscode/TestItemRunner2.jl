@@ -28,3 +28,5 @@ else
         Core.eval(Main, :(using $(Symbol(package_name))))
     end
 end
+
+println("Finished precompiling from the precompile process.")

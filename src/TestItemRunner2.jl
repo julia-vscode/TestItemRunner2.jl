@@ -82,8 +82,8 @@ end
 function precompil_test_env(environment, test_env)
     precompile_script = joinpath(@__DIR__, "precompile_main.jl")
 
-    buffer_out = IOBuffer()
-    buffer_err = IOBuffer()
+    # buffer_out = IOBuffer()
+    # buffer_err = IOBuffer()
 
     run(
         pipeline(
@@ -95,6 +95,8 @@ function precompil_test_env(environment, test_env)
             # stderr = buffer_err
         )
     )
+
+    println("Finished precompiling from the coordinator process.")
 end
 
 function launch_new_process(testitem, environment)

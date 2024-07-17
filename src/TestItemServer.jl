@@ -145,6 +145,9 @@ function process_coverage_data(coverage_results)
 end
 
 function run_testitem_handler(conn, params::TestserverRunTestitemRequestParams)
+    working_dir = dirname(uri2filepath(params.uri))
+    cd(working_dir)
+    
     coverage_results = CoverageTools.FileCoverage[] # This will hold the results of various coverage sprints
 
     for i in params.testsetups

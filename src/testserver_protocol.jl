@@ -48,7 +48,7 @@ end
 
 @dict_readable struct TestserverRunTestitemRequestParamsReturn <: JSONRPC.Outbound
     status::String
-    message::Union{Vector{TestMessage},Missing}
+    messages::Union{Vector{TestMessage},Missing}
     duration::Union{Float64,Missing}
     coverage::Union{Missing,Vector{FileCoverage}}
 end

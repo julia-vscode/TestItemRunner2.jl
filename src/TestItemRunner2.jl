@@ -117,8 +117,8 @@ function launch_new_process(testitem, environment)
                 Cmd(`julia --code-coverage=$(environment.coverage ? "user" : "none") --startup-file=no --history-file=no --depwarn=no $testserver_script $pipe_name $(key.project_uri===nothing ? "" : uri2filepath(key.project_uri)) $(uri2filepath(key.package_uri)) $(key.package_name)`),
                 environment.env
             ),
-            stdout = buffer_out,
-            stderr = buffer_err
+            # stdout = buffer_out,
+            # stderr = buffer_err
         )
     )
 

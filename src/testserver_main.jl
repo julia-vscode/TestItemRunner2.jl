@@ -1,4 +1,6 @@
-pushfirst!(LOAD_PATH, joinpath(@__DIR__, "..", "environments", "v$(VERSION.major).$(VERSION.minor)"))
+import Pkg
+Pkg.activate(joinpath(@__DIR__, "..", "environments", "v$(VERSION.major).$(VERSION.minor)"))
+# pushfirst!(LOAD_PATH, joinpath(@__DIR__, "..", "environments", "v$(VERSION.major).$(VERSION.minor)"))
 using TestItemServer
 # popfirst!(LOAD_PATH)
 

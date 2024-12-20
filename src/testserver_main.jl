@@ -1,6 +1,6 @@
-pushfirst!(LOAD_PATH, joinpath(@__DIR__, "..", "packages"))
+pushfirst!(LOAD_PATH, joinpath(@__DIR__, "..", "environments", "v$(VERSION.major).$(VERSION.minor)"))
 using TestItemServer
-popfirst!(LOAD_PATH)
+# popfirst!(LOAD_PATH)
 
 import Sockets
 

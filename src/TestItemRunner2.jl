@@ -122,7 +122,10 @@ function launch_new_process(testitem, environment)
         )
     )
 
+    @info "Status of process is" jl_process
+    @info "launch_new_process: Waiting for socket connection from new test process"    
     socket = Sockets.accept(server)
+    @info "launch_new_process: Got connection"
 
     connection = JSONRPC.JSONRPCEndpoint(socket, socket)
 

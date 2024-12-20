@@ -375,9 +375,12 @@ function run_tests(
 
         # Loop over all test items that should be executed
         for testitem in testitems, environment in environments
+            @info "Waiting for new free test process"
             test_process = get_free_testprocess(testitem, environment, max_workers)
 
+            @info "Queueing test"
             result_channel = execute_test(test_process, testitem, testsetups, timeout)
+            @info "Queued, got result channel"
 
             progress_reported_channel = Channel(1)
 
@@ -426,6 +429,8 @@ function run_tests(
         end
 
         yield()
+
+        @info "All test items queued, now waiting for them to finish"
 
         for i in executed_testitems
             wait(i.result)

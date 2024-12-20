@@ -168,18 +168,22 @@ function get_free_testprocess(testitem, environment, max_num_processes)
     key = get_key_from_testitem(testitem, environment)
 
     if !haskey(TEST_PROCESSES, key)
+        @info "get_free_testprocess: precompile start"
         precompil_test_env(testitem.env, environment)
 
+        @info "get_free_testprocess: launch and return"
         return launch_new_process(testitem, environment)
     else
         test_processes = TEST_PROCESSES[key]
 
         # TODO add some way to cancel
         while true
+            @info "get_free_testprocess: while loop start"
 
             # First lets just see whether we have an idle test process we can use
             for test_process in test_processes
                 if !isbusy(test_process)
+                    @info "get_free_testprocess: found an idle process"
                     needs_new_process = false
 
                     if !isconnected(test_process)
@@ -198,13 +202,16 @@ function get_free_testprocess(testitem, environment, max_num_processes)
                         test_process = launch_new_process(testitem, environment)
                     end
 
+                    @info "get_free_testprocess: return idle process"
                     return test_process
                 end
             end
 
             if length(test_processes) < max_num_processes
+                @info "get_free_testprocess: Need to launch a new process and return that"
                 return launch_new_process(testitem, environment)
             else
+                @info "get_free_testprocess: Genuin wait"
                 wait(SOME_TESTITEM_FINISHED)
             end
         end

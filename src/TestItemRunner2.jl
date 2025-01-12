@@ -105,6 +105,7 @@ function run_tests(
     testitems_by_id = Dict{String,TestItemControllers.TestItemDetail}()
     testsetups = TestItemControllers.TestSetupDetail[]
     testerrors = []
+    coverage_root_uris = Set{String}()
     for (uri, items) in pairs(JuliaWorkspaces.get_test_items(jw))
         project_details = JuliaWorkspaces.get_test_env(jw, uri)
         textfile = JuliaWorkspaces.get_text_file(jw, uri)
@@ -129,6 +130,10 @@ function run_tests(
                 codeLine,
                 codeColumn
             )
+
+            if project_details.package_uri !== nothing
+                push!(coverage_root_uris, string(project_details.package_uri))
+            end
 
             push!(
                 testitems,
@@ -213,7 +218,7 @@ function run_tests(
                 env isa Dict{String,Union{String,Nothing}} ? env : Dict{String,Union{String,Nothing}}(i for i in pairs(env)),
                 max_workers,
                 coverage ? "Coverage" : "Normal",
-                nothing
+                [i for i in coverage_root_uris]
             )],
             [i.details for i in testitems],
             testsetups,

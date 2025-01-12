@@ -1,37 +1,13 @@
 module TestItemRunner2
 
-export run_tests, kill_test_processes, TestEnvironment, print_process_diag
+export run_tests, kill_test_processes, print_process_diag, kill_controller
 
-# For easier dev, switch these two lines
-const pkg_root = "../packages"
-# const pkg_root = joinpath(homedir(), ".julia", "dev")
-
-import JSON, JSONRPC, ProgressMeter, TOML, UUIDs, Sockets, JuliaWorkspaces, AutoHashEquals
+import ProgressMeter, UUIDs, JuliaWorkspaces, TestItemControllers
 using Query
 
-using JSONRPC: @dict_readable
 using JuliaWorkspaces: JuliaWorkspace
 using JuliaWorkspaces.URIs2: URI, filepath2uri, uri2filepath
-using AutoHashEquals: @auto_hash_equals
-
-include("vendored_code.jl")
-
-include(joinpath(pkg_root, "TestItemServer", "src", "testserver_protocol.jl"))
-
-mutable struct TestProcess
-    key
-    process
-    connection
-    current_testitem
-    log_out
-    log_err
-end
-
-@auto_hash_equals struct TestEnvironment
-    name::String
-    coverage::Bool
-    env::Dict{String,Any}
-end
+using TestItemControllers: TestItemController
 
 struct TestrunResultMessage
     message::String
@@ -67,237 +43,34 @@ struct TestrunResult
     testitems::Vector{TestrunResultTestitem}
 end
 
-const TEST_PROCESSES = Dict{NamedTuple{(:project_uri,:package_uri,:package_name,:environment),Tuple{Union{URI,Nothing},URI,String,TestEnvironment}},Vector{TestProcess}}()
-const SOME_TESTITEM_FINISHED = Base.Event(true)
+const g_controller = Ref{Union{TestItemController,Nothing}}(nothing)
 
-function get_key_from_testitem(testitem, environment)
-    return (
-        project_uri = testitem.env.project_uri,
-        package_uri = testitem.env.package_uri,
-        package_name = testitem.env.package_name,
-        environment = environment
-    )
+function kill_controller()
+    g_controller[] = nothing
 end
 
-function precompil_test_env(environment, test_env)
-    precompile_script = joinpath(@__DIR__, "precompile_main.jl")
-
-    # buffer_out = IOBuffer()
-    # buffer_err = IOBuffer()
-
-    run(
-        pipeline(
-            addenv(
-                Cmd(`julia --code-coverage=$(test_env.coverage ? "user" : "none") --startup-file=no --history-file=no --depwarn=no $precompile_script $(environment.project_uri===nothing ? "" : uri2filepath(environment.project_uri)) $(uri2filepath(environment.package_uri)) $(environment.package_name)`),
-                test_env.env
-            ),
-            # stdout = buffer_out,
-            # stderr = buffer_err
-        )
-    )
-
-    println("Finished precompiling from the coordinator process.")
-end
-
-function launch_new_process(testitem, environment)
-    key = get_key_from_testitem(testitem, environment)
-
-    pipe_name = generate_pipe_name("tir", UUIDs.uuid4())
-
-    server = Sockets.listen(pipe_name)
-
-    testserver_script = joinpath(@__DIR__, "testserver_main.jl")
-
-    buffer_out = IOBuffer()
-    buffer_err = IOBuffer()
-
-    jl_process = open(
-        pipeline(
-            addenv(
-                Cmd(`julia --code-coverage=$(environment.coverage ? "user" : "none") --startup-file=no --history-file=no --depwarn=no $testserver_script $pipe_name $(key.project_uri===nothing ? "" : uri2filepath(key.project_uri)) $(uri2filepath(key.package_uri)) $(key.package_name)`),
-                environment.env
-            ),
-            stdout = buffer_out,
-            stderr = buffer_err
-        )
-    )
-
-    socket = Sockets.accept(server)
-
-    connection = JSONRPC.JSONRPCEndpoint(socket, socket)
-
-    run(connection)
-
-    test_process = TestProcess(key, jl_process, connection, nothing, buffer_out, buffer_err)
-    
-    if !haskey(TEST_PROCESSES, key)
-        TEST_PROCESSES[key] = TestProcess[]
-    end
-
-    test_processes = TEST_PROCESSES[key]
-
-    push!(test_processes, test_process)
-
-    @async try
-        wait(jl_process)
-
-        i = findfirst(isequal(test_process), test_processes)
-
-        popat!(test_processes, i)
-    catch err
-        Base.display_error(err, catch_backtrace())
-    end
-
-    return test_process
-end
-
-function isconnected(testprocess)
-    # TODO Properly implement
-    true
-end
-
-function isbusy(testprocess)
-    return testprocess.current_testitem!==nothing
-end
-
-function run_revise(testprocess)
-    return JSONRPC.send(testprocess.connection,testserver_revise_request_type, nothing)
-end
-
-function get_free_testprocess(testitem, environment, max_num_processes)
-    key = get_key_from_testitem(testitem, environment)
-
-    if !haskey(TEST_PROCESSES, key)
-        precompil_test_env(testitem.env, environment)
-
-        return launch_new_process(testitem, environment)
-    else
-        test_processes = TEST_PROCESSES[key]
-
-        # TODO add some way to cancel
-        while true
-
-            # First lets just see whether we have an idle test process we can use
-            for test_process in test_processes
-                if !isbusy(test_process)
-                    needs_new_process = false
-
-                    if !isconnected(test_process)
-                        needs_new_process = true
-                    else
-                        status = run_revise(test_process)
-
-                        if status != "success"
-                            kill(test_process.process)
-
-                            needs_new_process = true
-                        end
-                    end
-
-                    if needs_new_process
-                        test_process = launch_new_process(testitem, environment)
-                    end
-
-                    return test_process
-                end
-            end
-
-            if length(test_processes) < max_num_processes
-                return launch_new_process(testitem, environment)
-            else
-                wait(SOME_TESTITEM_FINISHED)
-            end
-        end
-    end
-end
-
-function execute_test(test_process, testitem, testsetups, timeout)
-
-    test_process.current_testitem = testitem
-
-    return_value = Channel(1)
-
-    finished = false
-
-    timed_out = false
-
-    timer = timeout>0 ? Timer(timeout) do i
-        if !finished
-            timed_out = true
-            kill(test_process.process)
-        end
-    end : nothing
-
-    @async try
-        result = nothing
-        try 
-            JSONRPC.send(
-                test_process.connection,
-                testserver_update_testsetups_type,
-                TestserverUpdateTestsetupsRequestParams(testsetups)
-            )
-
-            result = JSONRPC.send(
-                test_process.connection,
-                testserver_run_testitem_request_type,
-                TestserverRunTestitemRequestParams(
-                    string(testitem.detail.uri),
-                    testitem.detail.name,
-                    testitem.env.package_name,
-                    testitem.detail.option_default_imports,
-                    convert(Vector{String}, string.(testitem.detail.option_setup)),
-                    testitem.line,
-                    testitem.column,
-                    testitem.code,
-                    "Normal",
-                    missing
-                )
-            )
-        catch err
-            if err isa InvalidStateException
-                if timed_out
-                    msg = TestMessage("The test timed out", missing, missing, Location(string(testitem.detail.uri), Range(Position(testitem.line, testitem.column), Position(testitem.line, testitem.column))))
-                    result = TestserverRunTestitemRequestParamsReturn("timeout", [msg], missing, missing)
-                else
-                    msg = TestMessage("The test process crashed", missing, missing, Location(string(testitem.detail.uri), Range(Position(testitem.line, testitem.column), Position(testitem.line, testitem.column))))
-                    result = TestserverRunTestitemRequestParamsReturn("crash", [msg], missing, missing)
-                end
-            else
-                rethrow()
-            end            
-        end
-
-        out_log = String(take!(test_process.log_out))
-        err_log = String(take!(test_process.log_err))
-
-        finished = true
-
-        timer === nothing || close(timer)
-
-        test_process.current_testitem = nothing
-
-        notify(SOME_TESTITEM_FINISHED)
-
-        push!(return_value, (status = result.status, messages = result.messages, duration = result.duration, log_out = out_log, log_err = err_log))
-    catch err
-        Base.display_error(err, catch_backtrace())
-
-        println("child process log_out start")
-        println(String(take!(test_process.log_out)))
-        println("child process log_out end")
+function  print_process_diag()
+    for (k,v) in pairs(TEST_PROCESSES)
         println()
-        println("child process log_err start")
-        println(String(take!(test_process.log_err)))
-        println("child process log_err start")
+        println("$(length(v)) processes with")
+        println("  project_uri: $(k.project_uri)")
+        println("  package_uri: $(k.package_uri)")
+        println("  package_name: $(k.package_name)")
+        println("  env name: $(k.environment.name)")
     end
+end
 
-    return return_value
+function kill_test_processes()
+    for i in values(TEST_PROCESSES)
+        for j in i
+            kill(j.process)
+        end
+    end
 end
 
 function run_tests(
             path;
             filter=nothing,
-            verbose=false,
             max_workers::Int=Sys.CPU_THREADS,
             timeout=60*5,
             fail_on_detection_error=true,
@@ -305,28 +78,67 @@ function run_tests(
             print_failed_results=true,
             print_summary=true,
             progress_ui=:bar,
-            environments=[TestEnvironment("Default", false, Dict{String,Any}())]
+            profile_name="",
+            env::Dict=Dict{String,Union{String,Nothing}}(),
+            coverage=false,
         )
+    if g_controller[] === nothing
+        g_controller[] = TestItemController((a,b)->println("ERROR"))
+
+        @async try
+            run(
+                g_controller[],
+                (id, package_name, package_uri, project_uri, coverage, env) -> nothing,
+                id -> nothing,
+                (id, status) -> nothing,
+                (id, output) -> nothing
+            )
+        catch err
+            Base.display_error(err, catch_backtrace())
+        end
+    end
+
     jw = JuliaWorkspaces.workspace_from_folders(([path]))
     
     # Flat list of @testitems and @testmodule and @testsnippet
     testitems = []
-    testsetups = []
+    testitems_by_id = Dict{String,TestItemControllers.TestItemDetail}()
+    testsetups = TestItemControllers.TestSetupDetail[]
     testerrors = []
     for (uri, items) in pairs(JuliaWorkspaces.get_test_items(jw))
         project_details = JuliaWorkspaces.get_test_env(jw, uri)
         textfile = JuliaWorkspaces.get_text_file(jw, uri)
 
         for item in items.testitems            
-            line, column = JuliaWorkspaces.position_at(textfile.content, item.code_range.start)
-            push!(testitems, (
-                uri=uri,
-                line=line,
-                column=column,
-                code=textfile.content.content[item.code_range],
-                env=project_details,
-                detail=item),
+            line, column = JuliaWorkspaces.position_at(textfile.content, item.range.start)
+            codeLine, codeColumn = JuliaWorkspaces.position_at(textfile.content, item.code_range.start)
+
+            testitem_detail = TestItemControllers.TestItemDetail(
+                item.id,
+                string(item.uri),
+                item.name,
+                project_details.package_name,
+                project_details.package_uri === nothing ? nothing : string(project_details.package_uri),
+                project_details.project_uri === nothing ? nothing : string(project_details.project_uri),
+                project_details.env_content_hash,
+                item.option_default_imports,
+                string.(item.option_setup),
+                line,
+                column,
+                textfile.content.content[item.code_range],
+                codeLine,
+                codeColumn
             )
+
+            push!(
+                testitems,
+                (
+                    option_tags = item.option_tags,
+                    details = testitem_detail
+                )                
+            )
+
+            testitems_by_id[item.id] = testitem_detail
         end
 
         for item in items.testsetups
@@ -368,71 +180,180 @@ function run_tests(
     if length(testerrors) == 0  || fail_on_detection_error==false
         # Filter @testitems
         if filter !== nothing
-            filter!(i->filter((filename=uri2filepath(i.uri), name=i.detail.name, tags=i.detail.option_tags, package_name=i.env.package_name)), testitems)
+            filter!(i->filter((filename=uri2filepath(URI(i.details.uri)), name=i.details.label, tags=i.option_tags, package_name=i.details.package_name)), testitems)
         end
 
-        p = ProgressMeter.Progress(length(testitems)*length(environments), barlen=50, enabled=progress_ui==:bar)
+        p = ProgressMeter.Progress(length(testitems), barlen=50, enabled=progress_ui==:bar)
 
-        # Loop over all test items that should be executed
-        for testitem in testitems, environment in environments
-            test_process = get_free_testprocess(testitem, environment, max_workers)
+        update_progress_bar() = if progress_ui==:bar
+            ProgressMeter.next!(
+                p,
+                showvalues = [
+                    (Symbol("Successful tests"), count_success),
+                    (Symbol("Failed tests"), count_fail),
+                    (Symbol("Errored tests"), count_error),
+                    (Symbol("Crashed tests"), count_crash),
+                    (Symbol("Timed out tests"), count_timeout),
+                    # ((Symbol("Number of processes for package '$(i.first.package_name)'"), length(i.second)) for i in TEST_PROCESSES)...
+                ]
+            )
+        end
 
-            result_channel = execute_test(test_process, testitem, testsetups, timeout)
+        cs = TestItemControllers.CancellationTokens.CancellationTokenSource()
 
-            progress_reported_channel = Channel(1)
+        ret = TestItemControllers.execute_testrun(
+            g_controller[],
+            string(UUIDs.uuid4()), # Generate random id
+            [TestItemControllers.TestProfile(
+                profile_name,
+                profile_name,
+                "julia",
+                String[],
+                "",
+                env isa Dict{String,Union{String,Nothing}} ? env : Dict{String,Union{String,Nothing}}(i for i in pairs(env)),
+                max_workers,
+                coverage ? "Coverage" : "Normal",
+                nothing
+            )],
+            [i.details for i in testitems],
+            testsetups,
+            # testitem_started_callback,
+            (testrun_id, testitem_id) -> nothing,
+            # testitem_passed_callback
+            (testrun_id, testitem_id, duration) -> begin
+                count_success += 1
 
-            @async try
-                res = fetch(result_channel)
+                testitem_detail = testitems_by_id[testitem_id]
 
-                if res.status=="passed"
-                    count_success += 1
-                elseif res.status=="timeout"
-                    count_timeout += 1
-                elseif res.status == "failed"
-                    count_fail += 1
-                elseif res.status == "errored"
-                    count_error += 1
-                elseif res.status == "crash"
-                    count_crash += 1
-                else
-                    error("Unknown test status")
-                end
-
-                if progress_ui==:bar
-                    ProgressMeter.next!(
-                        p,
-                        showvalues = [
-                            (Symbol("Successful tests"), count_success),
-                            (Symbol("Failed tests"), count_fail),
-                            (Symbol("Errored tests"), count_error),
-                            (Symbol("Crashed tests"), count_crash),
-                            (Symbol("Timed out tests"), count_timeout),
-                            ((Symbol("Number of processes for package '$(i.first.package_name)'"), length(i.second)) for i in TEST_PROCESSES)...
-                        ]
+                push!(
+                    responses,
+                    (
+                        result = (;
+                            status = "passed",
+                            duration = duration,
+                            messages = missing
+                        ),
+                        testitem = (;
+                            detail = testitem_detail
+                        )
                     )
-                end
+                )
+
+                update_progress_bar()
 
                 if progress_ui==:log
-                    duration_string = res.duration !== missing ? " ($(res.duration)ms)" : ""
-                    println("$(res.status=="passed" ? "✓" : "✗") $(environment.name) $(uri2filepath(testitem.uri)):$(testitem.detail.name) → $(res.status)$duration_string")
+                    duration_string = duration !== missing ? " ($(duration)ms)" : ""
+                    println("✓ $(uri2filepath(URI(testitem_detail.uri))):$(testitem_detail.line) $(testitem_detail.label) → passed$duration_string")
+                    # println("✓ (environment.name) $(uri2filepath(testitem.uri)):$(testitem.detail.name) → $(res.status)$duration_string")
+                    # println("$(res.status=="passed" ? "✓" : "✗") $(environment.name) $(uri2filepath(testitem.uri)):$(testitem.detail.name) → $(res.status)$duration_string")
                 end
+            end,
+            # testitem_failed_callback
+            (testrun_id, testitem_id, messages, duration) -> begin
+                count_fail += 1
 
-                push!(progress_reported_channel, true)
-            catch err
-                Base.display_error(err, catch_backtrace())
-            end
+                testitem_detail = testitems_by_id[testitem_id]
 
-            push!(executed_testitems, (testitem=testitem, testenvironment=environment, result=result_channel, progress_reported_channel=progress_reported_channel))
-        end
+                push!(
+                    responses,
+                    (
+                        result = (;
+                            status = "failed",
+                            duration = missing,
+                            messages = messages
+                        ),
+                        testitem = (;
+                            detail = testitem_detail
+                        )
+                    )
+                )
 
-        yield()
+                
+                update_progress_bar()
+
+                if progress_ui==:log
+                    duration_string = duration !== missing ? " ($(duration)ms)" : ""
+                    println("✗ $(uri2filepath(URI(testitem_detail.uri))):$(testitem_detail.line) $(testitem_detail.label) → failed$duration_string")
+                    # println("✓ (environment.name) $(uri2filepath(testitem.uri)):$(testitem.detail.name) → $(res.status)$duration_string")
+                    # println("$(res.status=="passed" ? "✓" : "✗") $(environment.name) $(uri2filepath(testitem.uri)):$(testitem.detail.name) → $(res.status)$duration_string")
+                end
+            end,
+            # testitem_errored_callback
+            (testrun_id, testitem_id, messages, duration) -> begin
+                count_error += 1
+
+                testitem_detail = testitems_by_id[testitem_id]
+
+                push!(
+                    responses,
+                    (
+                        result = (;
+                            status = "errored",
+                            duration = missing,
+                            messages = messages
+                        ),
+                        testitem = (;
+                            detail = testitem_detail
+                        )
+                    )
+                )
+
+                
+                update_progress_bar()
+
+                if progress_ui==:log
+                    duration_string = duration !== missing ? " ($(duration)ms)" : ""
+                    println("✗ $(uri2filepath(URI(testitem_detail.uri))):$(testitem_detail.line) $(testitem_detail.label) → errored$duration_string")
+                    # println("✓ (environment.name) $(uri2filepath(testitem.uri)):$(testitem.detail.name) → $(res.status)$duration_string")
+                    # println("$(res.status=="passed" ? "✓" : "✗") $(environment.name) $(uri2filepath(testitem.uri)):$(testitem.detail.name) → $(res.status)$duration_string")
+                end
+            end,
+            # append_output_callback
+            (testrun_id, testitem_id, output) -> nothing,
+            # attach_debugger_callback
+            (testrun_id, debug_pipename) -> error("Not Implemented"),
+            TestItemControllers.CancellationTokens.get_token(cs)
+        )
 
 
-        for i in executed_testitems
-            wait(i.result)
-        end
 
-        append!(responses, (testitem=i.testitem, testenvironment=i.testenvironment, result=take!(i.result)) for i in executed_testitems)
+
+                # if res.status=="passed"
+                #     count_success += 1
+                # elseif res.status=="timeout"
+                #     count_timeout += 1
+                # elseif res.status == "failed"
+                #     count_fail += 1
+                # elseif res.status == "errored"
+                #     count_error += 1
+                # elseif res.status == "crash"
+                #     count_crash += 1
+                # else
+                #     error("Unknown test status")
+                # end
+
+                # if progress_ui==:bar
+                #     ProgressMeter.next!(
+                #         p,
+                #         showvalues = [
+                #             (Symbol("Successful tests"), count_success),
+                #             (Symbol("Failed tests"), count_fail),
+                #             (Symbol("Errored tests"), count_error),
+                #             (Symbol("Crashed tests"), count_crash),
+                #             (Symbol("Timed out tests"), count_timeout),
+                #             ((Symbol("Number of processes for package '$(i.first.package_name)'"), length(i.second)) for i in TEST_PROCESSES)...
+                #         ]
+                #     )
+                # end
+
+                # if progress_ui==:log
+                #     duration_string = res.duration !== missing ? " ($(res.duration)ms)" : ""
+                #     println("$(res.status=="passed" ? "✓" : "✗") $(environment.name) $(uri2filepath(testitem.uri)):$(testitem.detail.name) → $(res.status)$duration_string")
+                # end
+
+
+
+        # append!(responses, (testitem=i.testitem, testenvironment=i.testenvironment, result=take!(i.result)) for i in executed_testitems)
     end
 
     if print_summary
@@ -465,14 +386,14 @@ function run_tests(
                 println()
 
                 if i.result.status == "failed"
-                    println("Test failure in $(uri2filepath(URI(i.testitem.uri))):$(i.testitem.detail.name)")
+                    println("Test failure in $(uri2filepath(URI(i.testitem.detail.uri))):$(i.testitem.detail.line) $(i.testitem.detail.label)")
                 elseif i.result.status == "errored"
-                    println("Test error in $(uri2filepath(URI(i.testitem.uri))):$(i.testitem.detail.name)")
+                    println("Test error in $(uri2filepath(URI(i.testitem.detail.uri))):$(i.testitem.detail.line) $(i.testitem.detail.label)")
                 end
 
                 if i.result.messages!==missing                
                     for j in i.result.messages
-                        println("  at $(uri2filepath(URI(j.location.uri))):$(j.location.range.start.line)")
+                        println("  at $(uri2filepath(URI(j.uri))):$(j.line)")
                         println("    ", replace(j.message, "\n"=>"\n    "))
                     end
                 end
@@ -487,12 +408,23 @@ function run_tests(
         end
     end
 
-    for i in executed_testitems
-        wait(i.progress_reported_channel)
-    end
-
     if return_results
-        duplicated_testitems = TestrunResultTestitem[TestrunResultTestitem(ti.testitem.detail.name, ti.testitem.uri, [TestrunResultTestitemProfile(ti.testenvironment.name, Symbol(ti.result.status), ti.result.duration, ti.result.messages===missing ? missing : [TestrunResultMessage(msg.message, URI(msg.location.uri), msg.location.range.start.line, msg.location.range.start.character) for msg in ti.result.messages])]) for ti in responses]
+        duplicated_testitems = TestrunResultTestitem[
+            TestrunResultTestitem(
+                ti.testitem.detail.label,
+                URI(ti.testitem.detail.uri),
+                [
+                    TestrunResultTestitemProfile(
+                        profile_name,
+                        Symbol(ti.result.status),
+                        ti.result.duration,
+                        ti.result.messages===missing ? missing : [
+                            TestrunResultMessage(msg.message, URI(msg.uri), msg.line, msg.column) for msg in ti.result.messages
+                        ]
+                    )
+                ]
+            ) for ti in responses
+        ]
 
         deduplicated_testitems = duplicated_testitems |>
             @groupby({_.name, _.uri}) |>
@@ -509,23 +441,6 @@ function run_tests(
     end
 end
 
-function  print_process_diag()
-    for (k,v) in pairs(TEST_PROCESSES)
-        println()
-        println("$(length(v)) processes with")
-        println("  project_uri: $(k.project_uri)")
-        println("  package_uri: $(k.package_uri)")
-        println("  package_name: $(k.package_name)")
-        println("  env name: $(k.environment.name)")
-    end
-end
 
-function kill_test_processes()
-    for i in values(TEST_PROCESSES)
-        for j in i
-            kill(j.process)
-        end
-    end
-end
 
 end

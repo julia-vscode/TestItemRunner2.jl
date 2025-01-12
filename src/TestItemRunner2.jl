@@ -50,13 +50,13 @@ function kill_controller()
 end
 
 function  print_process_diag()
-    for (k,v) in pairs(TEST_PROCESSES)
+    for (k,v) in pairs(g_controller[].testprocesses)
         println()
         println("$(length(v)) processes with")
         println("  project_uri: $(k.project_uri)")
         println("  package_uri: $(k.package_uri)")
         println("  package_name: $(k.package_name)")
-        println("  env name: $(k.environment.name)")
+        # println("  env name: $(k.environment.name)")
     end
 end
 

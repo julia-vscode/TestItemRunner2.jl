@@ -46,6 +46,7 @@ end
 const g_controller = Ref{Union{TestItemController,Nothing}}(nothing)
 
 function kill_controller()
+    TestItemControllers.shutdown(g_controller[])
     g_controller[] = nothing
 end
 

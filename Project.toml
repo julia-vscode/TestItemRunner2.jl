@@ -31,6 +31,7 @@ JuliaWorkspaces = "5"
 JSON = "0.21"
 JSONRPC = "1.3.6"
 ProgressMeter = "1.7"
+"TestItemControllers" = "1"
 
 [targets]
 test = ["Test"]

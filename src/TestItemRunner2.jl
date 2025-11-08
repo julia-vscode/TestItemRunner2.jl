@@ -164,25 +164,11 @@ function run_tests(
 
         debuglogger = Logging.ConsoleLogger(stderr, Logging.Warn)
 
+        environment_name = environments[1].name
+
         Logging.with_logger(debuglogger) do
 
-            ret =  TestItemControllers.execute_testrun(
-                tic,
-                "Testrun ID",
-                [
-                    TestItemControllers.TestProfile(
-                        "Default", #i.id,
-                        "Deafult", #i.label,
-                        "julia", #i.juliaCmd,
-                        String[], #i.juliaArgs,
-                        missing, #i.juliaNumThreads,
-                        Dict{String,Union{String,Nothing}}(), #i.juliaEnv,
-                        2, #i.maxProcessCount,
-                        "Normal", #i.mode,
-                        nothing #coalesce(i.coverageRootUris,nothing)
-                    )
-                ],
-                pairs(JuliaWorkspaces.get_test_items(jw)) |>
+            testitems_to_run_by_id = pairs(JuliaWorkspaces.get_test_items(jw)) |>
                     @map({uri = _.first, items = _.second.testitems}) |>
                     @mutate(
                         project_details = JuliaWorkspaces.get_test_env(jw, _.uri),
@@ -190,6 +176,7 @@ function run_tests(
                     ) |>
                     @mapmany(
                         _.items,
+                        __.id => 
                         TestItemControllers.TestItemDetail(
                             __.id,
                             string(__.uri),
@@ -207,7 +194,25 @@ function run_tests(
                             JuliaWorkspaces.position_at(_.textfile.content, __.code_range.start)[2]
                         )
                     ) |>
-                    collect,
+                    Dict
+
+            ret =  TestItemControllers.execute_testrun(
+                tic,
+                "Testrun ID",
+                [
+                    TestItemControllers.TestProfile(
+                        i.name, #i.id,
+                        i.name, #i.label,
+                        "julia", #i.juliaCmd,
+                        String[], #i.juliaArgs,
+                        missing, #i.juliaNumThreads,
+                        i.env, #i.juliaEnv,
+                        max_workers, #i.maxProcessCount,
+                        i.coverage ? "Coverage" : "Normal", #i.mode,
+                        nothing #coalesce(i.coverageRootUris,nothing)
+                    ) for i in environments
+                ],
+                collect(values(testitems_to_run_by_id)),
                 pairs(JuliaWorkspaces.get_test_items(jw)) |>
                     @map({uri = _.first, items = _.second.testsetups}) |>
                     @mutate(
@@ -231,38 +236,50 @@ function run_tests(
                 (testrun_id, testitem_id, duration) -> begin
                     count_success += 1
 
+                    testitem = testitems_to_run_by_id[testitem_id]
+
                     if progress_ui==:log
                         duration_string = duration !== missing ? " ($(duration)ms)" : ""
-                        println("✓ (environment.name) (uri2filepath(testitem.uri)):(testitem.detail.name) → passed$duration_string")
+                        println("✓ $environment_name $(uri2filepath(URI(testitem.uri))):$(testitem.label) → passed$duration_string")
                     end
 
                     if progress_ui==:bar
                         progressbar_next()
                     end
+
+                    push!(responses, (testitem=testitem, testenvironment=environments[1], result=(status=:passed, messages=missing, duration=duration)))
                 end,
                 # testitem_failed_callback
                 (testrun_id, testitem_id, messages, duration) -> begin
                     count_fail += 1
+                    testitem = testitems_to_run_by_id[testitem_id]
+
                     if progress_ui==:log
                         duration_string = duration !== missing ? " ($(duration)ms)" : ""
-                        println("✗ (environment.name) (uri2filepath(testitem.uri)):(testitem.detail.name) → failed$duration_string")
+                        println("✗ $environment_name $(uri2filepath(URI(testitem.uri))):$(testitem.label) → failed$duration_string")
                     end
 
                     if progress_ui==:bar
                         progressbar_next()
                     end
+
+                    push!(responses, (testitem=testitem, testenvironment=environments[1], result=(status=:failed, messages=messages, duration=duration)))
                 end,
                 # testitem_errored_callback
                 (testrun_id, testitem_id, messages, duration) -> begin
                     count_error += 1
+                    testitem = testitems_to_run_by_id[testitem_id]
+
                     if progress_ui==:log
                         duration_string = duration !== missing ? " ($(duration)ms)" : ""
-                        println("✗ (environment.name) (uri2filepath(testitem.uri)):(testitem.detail.name) → errored$duration_string")
+                        println("✗ $environment_name $(uri2filepath(URI(testitem.uri))):$(testitem.label) → errored$duration_string")
                     end
 
                     if progress_ui==:bar
                         progressbar_next()
                     end
+
+                    push!(responses, (testitem=testitem, testenvironment=environments[1], result=(status=:errored, messages=messages, duration=duration)))
                 end,
                 # append_output_callback
                 (testrun_id, testitem_id, output) -> nothing,
@@ -353,23 +370,23 @@ function run_tests(
         end
     
         for i in responses
-            if i.result.status in ("failed", "errored", "crash") 
+            if i.result.status in (:failed, :errored, :crash) 
                 println()
 
-                if i.result.status == "failed"
-                    println("Test failure in $(uri2filepath(URI(i.testitem.uri))):$(i.testitem.detail.name)")
-                elseif i.result.status == "errored"
-                    println("Test error in $(uri2filepath(URI(i.testitem.uri))):$(i.testitem.detail.name)")
+                if i.result.status == :failed
+                    println("Test failure in $(uri2filepath(URI(i.testitem.uri))):$(i.testitem.label)")
+                elseif i.result.status == :errored
+                    println("Test error in $(uri2filepath(URI(i.testitem.uri))):$(i.testitem.label)")
                 end
 
                 if i.result.messages!==missing                
                     for j in i.result.messages
-                        println("  at $(uri2filepath(URI(j.location.uri))):$(j.location.range.start.line)")
+                        println("  at $(uri2filepath(URI(j.uri))):$(j.line)")
                         println("    ", replace(j.message, "\n"=>"\n    "))
                     end
                 end
 
-                if i.result.status == "crash"
+                if i.result.status == :crash
                     println("    stdout log:")
                     println("      ", replace(i.result.log_out, "\n"=>"\n      "))
                     println("    stderr log:")
@@ -384,7 +401,7 @@ function run_tests(
     end
 
     if return_results
-        duplicated_testitems = TestrunResultTestitem[TestrunResultTestitem(ti.testitem.detail.name, ti.testitem.uri, [TestrunResultTestitemProfile(ti.testenvironment.name, Symbol(ti.result.status), ti.result.duration, ti.result.messages===missing ? missing : [TestrunResultMessage(msg.message, URI(msg.location.uri), msg.location.range.start.line, msg.location.range.start.character) for msg in ti.result.messages])]) for ti in responses]
+        duplicated_testitems = TestrunResultTestitem[TestrunResultTestitem(ti.testitem.label, URI(ti.testitem.uri), [TestrunResultTestitemProfile(ti.testenvironment.name, ti.result.status, ti.result.duration, ti.result.messages===missing ? missing : [TestrunResultMessage(msg.message, URI(msg.uri), msg.line, msg.column) for msg in ti.result.messages])]) for ti in responses]
 
         deduplicated_testitems = duplicated_testitems |>
             @groupby({_.name, _.uri}) |>

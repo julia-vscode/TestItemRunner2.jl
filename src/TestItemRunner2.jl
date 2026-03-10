@@ -107,7 +107,8 @@ function run_tests(
         for item in items.testsetups
             line, column = JuliaWorkspaces.position_at(textfile.content, item.code_range.start)
             push!(testsetups,
-                TestsetupDetails(
+                TestItemControllers.TestSetupDetail(
+                    missing,  # packageUri
                     string(item.name),
                     string(item.kind),
                     string(uri),
@@ -136,6 +137,7 @@ function run_tests(
     count_fail = 0
     count_error = 0
     count_crash = 0
+    count_skipped = 0
 
     progressbar_next = () -> begin
         ProgressMeter.next!(
@@ -146,7 +148,8 @@ function run_tests(
                 (Symbol("Errored tests"), count_error),
                 (Symbol("Crashed tests"), count_crash),
                 (Symbol("Timed out tests"), count_timeout),
-                # ((Symbol("Number of processes for package '$(i.first.package_name)'"), length(i.second)) for i in TEST_PROCESSES)...
+                (Symbol("Skipped tests"), count_skipped),
+                # Process count not available - TestItemControllers manages processes internally
             ]
         )
     end
@@ -190,19 +193,20 @@ function run_tests(
                             JuliaWorkspaces.position_at(_.textfile.content, __.code_range.start)[1],
                             JuliaWorkspaces.position_at(_.textfile.content, __.code_range.start)[2],
                             _.textfile.content.content[__.code_range],
-                            JuliaWorkspaces.position_at(_.textfile.content, __.code_range.start)[1],
-                            JuliaWorkspaces.position_at(_.textfile.content, __.code_range.start)[2]
+                            JuliaWorkspaces.position_at(_.textfile.content, __.code_range.stop)[1],
+                            JuliaWorkspaces.position_at(_.textfile.content, __.code_range.stop)[2]
                         )
                     ) |>
                     Dict
 
-            ret =  TestItemControllers.execute_testrun(
-                tic,
-                "Testrun ID",
+            ret = try
+                TestItemControllers.execute_testrun(
+                    tic,
+                    "Testrun ID",
                 [
                     TestItemControllers.TestProfile(
                         i.name, #i.id,
-                        i.name, #i.label,
+                        "$(i.name) Profile", #i.label,
                         "julia", #i.juliaCmd,
                         String[], #i.juliaArgs,
                         missing, #i.juliaNumThreads,
@@ -221,6 +225,7 @@ function run_tests(
                     @mapmany(
                         _.items,
                         TestItemControllers.TestSetupDetail(
+                            missing,  # packageUri
                             string(__.name),
                             string(__.kind),
                             string(_.uri),
@@ -281,6 +286,21 @@ function run_tests(
 
                     push!(responses, (testitem=testitem, testenvironment=environments[1], result=(status=:errored, messages=messages, duration=duration)))
                 end,
+                # testitem_skipped_callback
+                (testrun_id, testitem_id) -> begin
+                    count_skipped += 1
+                    testitem = testitems_to_run_by_id[testitem_id]
+
+                    if progress_ui==:log
+                        println("⊘ $environment_name $(uri2filepath(URI(testitem.uri))):$(testitem.label) → skipped")
+                    end
+
+                    if progress_ui==:bar
+                        progressbar_next()
+                    end
+
+                    push!(responses, (testitem=testitem, testenvironment=environments[1], result=(status=:skipped, messages=missing, duration=missing)))
+                end,
                 # append_output_callback
                 (testrun_id, testitem_id, output) -> nothing,
                 # attach_debugger_callback
@@ -288,6 +308,16 @@ function run_tests(
                 # token
                 nothing
             )
+            catch err
+                @error "TestItemControllers.execute_testrun failed" exception=(err, catch_backtrace())
+                rethrow(err)
+            end
+
+            # Extract coverage data if coverage mode is enabled
+            if any(env -> env.coverage, environments) && ret.coverage !== nothing
+                # TODO: Process coverage data from ret.coverage
+                @info "Coverage data collected but not yet processed"
+            end
         end
 
        
@@ -355,6 +385,7 @@ function run_tests(
         push!(summaries, "$(count_success) passed")
         push!(summaries, "$(count_fail) failed")
         push!(summaries, "$(count_error) errored")
+        push!(summaries, "$(count_skipped) skipped")
         push!(summaries, "$(count_crash) crashed")
         push!(summaries, "$(count_timeout) timed out")
 
@@ -370,7 +401,7 @@ function run_tests(
         end
     
         for i in responses
-            if i.result.status in (:failed, :errored, :crash) 
+            if i.result.status in (:failed, :errored, :crash, :skipped) 
                 println()
 
                 if i.result.status == :failed
@@ -396,9 +427,10 @@ function run_tests(
         end
     end
 
-    for i in executed_testitems
-        wait(i.progress_reported_channel)
-    end
+    # Note: executed_testitems is no longer used in the refactored synchronous execution model
+    # for i in executed_testitems
+    #     wait(i.progress_reported_channel)
+    # end
 
     if return_results
         duplicated_testitems = TestrunResultTestitem[TestrunResultTestitem(ti.testitem.label, URI(ti.testitem.uri), [TestrunResultTestitemProfile(ti.testenvironment.name, ti.result.status, ti.result.duration, ti.result.messages===missing ? missing : [TestrunResultMessage(msg.message, URI(msg.uri), msg.line, msg.column) for msg in ti.result.messages])]) for ti in responses]
@@ -419,21 +451,16 @@ function run_tests(
 end
 
 function  print_process_diag()
-    for (k,v) in pairs(TEST_PROCESSES)
-        println()
-        println("$(length(v)) processes with")
-        println("  project_uri: $(k.project_uri)")
-        println("  package_uri: $(k.package_uri)")
-        println("  package_name: $(k.package_name)")
-        println("  env name: $(k.environment.name)")
-    end
+    # TODO: Implement process diagnostics
+    # TestItemControllers manages processes internally
+    println("Process diagnostics not available - TestItemControllers manages processes internally")
 end
 
 function kill_test_processes()
-    for i in values(TEST_PROCESSES)
-        for j in i
-            kill(j.process)
-        end
+    # TODO: Implement graceful test process termination
+    # TestItemControllers manages process lifecycle internally  
+    if isassigned(g_testitemcontroller)
+        TestItemControllers.shutdown(g_testitemcontroller[])
     end
 end
 

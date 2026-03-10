@@ -78,7 +78,8 @@ function run_tests(
             print_failed_results=true,
             print_summary=true,
             progress_ui=:bar,
-            environments=[TestEnvironment("Default", false, Dict{String,Any}())]
+            environments=[TestEnvironment("Default", false, Dict{String,Any}())],
+            token=nothing
         )
     tic = get_testitemcontroller()
 
@@ -306,7 +307,7 @@ function run_tests(
                 # attach_debugger_callback
                 (testrun_id, debug_pipename) -> nothing,
                 # token
-                nothing
+                token
             )
             catch err
                 @error "TestItemControllers.execute_testrun failed" exception=(err, catch_backtrace())

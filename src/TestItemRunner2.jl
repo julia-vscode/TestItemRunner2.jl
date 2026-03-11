@@ -87,7 +87,6 @@ function run_tests(
     
     # Flat list of @testitems and @testmodule and @testsnippet
     testitems = []
-    testsetups = []
     testerrors = []
     for (uri, items) in pairs(JuliaWorkspaces.get_test_items(jw))
         project_details = JuliaWorkspaces.get_test_env(jw, uri)
@@ -102,21 +101,6 @@ function run_tests(
                 code=textfile.content.content[item.code_range],
                 env=project_details,
                 detail=item),
-            )
-        end
-
-        for item in items.testsetups
-            line, column = JuliaWorkspaces.position_at(textfile.content, item.code_range.start)
-            push!(testsetups,
-                TestItemControllers.TestSetupDetail(
-                    missing,  # packageUri
-                    string(item.name),
-                    string(item.kind),
-                    string(uri),
-                    line,
-                    column,
-                    textfile.content.content[item.code_range]
-                )
             )
         end
 
@@ -156,7 +140,6 @@ function run_tests(
     end
 
     responses = []
-    executed_testitems = []
 
     if length(testerrors) == 0  || fail_on_detection_error==false
         # Filter @testitems
@@ -200,6 +183,16 @@ function run_tests(
                     ) |>
                     Dict
 
+            # Apply filter to the test items dict (the earlier filter on 'testitems' was only for counting)
+            if filter !== nothing
+                filtered_ids = Set(i.detail.id for i in testitems)
+                for id in collect(keys(testitems_to_run_by_id))
+                    if !(id in filtered_ids)
+                        delete!(testitems_to_run_by_id, id)
+                    end
+                end
+            end
+
             ret = try
                 TestItemControllers.execute_testrun(
                     tic,
@@ -211,7 +204,7 @@ function run_tests(
                         "julia", #i.juliaCmd,
                         String[], #i.juliaArgs,
                         missing, #i.juliaNumThreads,
-                        i.env, #i.juliaEnv,
+                        Dict{String,Union{String,Nothing}}(k => v isa AbstractString ? string(v) : v === nothing ? nothing : string(v) for (k,v) in i.env), #i.juliaEnv,
                         max_workers, #i.maxProcessCount,
                         i.coverage ? "Coverage" : "Normal", #i.mode,
                         nothing #coalesce(i.coverageRootUris,nothing)
@@ -226,7 +219,7 @@ function run_tests(
                     @mapmany(
                         _.items,
                         TestItemControllers.TestSetupDetail(
-                            missing,  # packageUri
+                            nothing,  # packageUri
                             string(__.name),
                             string(__.kind),
                             string(_.uri),
@@ -315,64 +308,11 @@ function run_tests(
             end
 
             # Extract coverage data if coverage mode is enabled
-            if any(env -> env.coverage, environments) && ret.coverage !== nothing
-                # TODO: Process coverage data from ret.coverage
+            if any(env -> env.coverage, environments) && ret !== missing && ret !== nothing
+                # TODO: Process coverage data from ret
                 @info "Coverage data collected but not yet processed"
             end
         end
-
-       
-
-       
-        #         if res.status=="passed"
-        #             count_success += 1
-        #         elseif res.status=="timeout"
-        #             count_timeout += 1
-        #         elseif res.status == "failed"
-        #             count_fail += 1
-        #         elseif res.status == "errored"
-        #             count_error += 1
-        #         elseif res.status == "crash"
-        #             count_crash += 1
-        #         else
-        #             error("Unknown test status")
-        #         end
-
-        #         if progress_ui==:bar
-        #             ProgressMeter.next!(
-        #                 p,
-        #                 showvalues = [
-        #                     (Symbol("Successful tests"), count_success),
-        #                     (Symbol("Failed tests"), count_fail),
-        #                     (Symbol("Errored tests"), count_error),
-        #                     (Symbol("Crashed tests"), count_crash),
-        #                     (Symbol("Timed out tests"), count_timeout),
-        #                     ((Symbol("Number of processes for package '$(i.first.package_name)'"), length(i.second)) for i in TEST_PROCESSES)...
-        #                 ]
-        #             )
-        #         end
-
-        #         if progress_ui==:log
-        #             duration_string = res.duration !== missing ? " ($(res.duration)ms)" : ""
-        #             println("$(res.status=="passed" ? "✓" : "✗") $(environment.name) $(uri2filepath(testitem.uri)):$(testitem.detail.name) → $(res.status)$duration_string")
-        #         end
-
-        #         push!(progress_reported_channel, true)
-        #     catch err
-        #         Base.display_error(err, catch_backtrace())
-        #     end
-
-        #     push!(executed_testitems, (testitem=testitem, testenvironment=environment, result=result_channel, progress_reported_channel=progress_reported_channel))
-        # end
-
-    #     yield()
-
-
-    #     for i in executed_testitems
-    #         wait(i.result)
-    #     end
-
-    #     append!(responses, (testitem=i.testitem, testenvironment=i.testenvironment, result=take!(i.result)) for i in executed_testitems)
     end
 
     if print_summary
@@ -402,7 +342,7 @@ function run_tests(
         end
     
         for i in responses
-            if i.result.status in (:failed, :errored, :crash, :skipped) 
+            if i.result.status in (:failed, :errored) 
                 println()
 
                 if i.result.status == :failed
@@ -417,24 +357,12 @@ function run_tests(
                         println("    ", replace(j.message, "\n"=>"\n    "))
                     end
                 end
-
-                if i.result.status == :crash
-                    println("    stdout log:")
-                    println("      ", replace(i.result.log_out, "\n"=>"\n      "))
-                    println("    stderr log:")
-                    println("      ", replace(i.result.log_err, "\n"=>"\n      "))
-                end
             end
         end
     end
 
-    # Note: executed_testitems is no longer used in the refactored synchronous execution model
-    # for i in executed_testitems
-    #     wait(i.progress_reported_channel)
-    # end
-
     if return_results
-        duplicated_testitems = TestrunResultTestitem[TestrunResultTestitem(ti.testitem.label, URI(ti.testitem.uri), [TestrunResultTestitemProfile(ti.testenvironment.name, ti.result.status, ti.result.duration, ti.result.messages===missing ? missing : [TestrunResultMessage(msg.message, URI(msg.uri), msg.line, msg.column) for msg in ti.result.messages])]) for ti in responses]
+        duplicated_testitems = TestrunResultTestitem[TestrunResultTestitem(ti.testitem.label, URI(ti.testitem.uri), [TestrunResultTestitemProfile(ti.testenvironment.name, ti.result.status, ti.result.duration, ti.result.messages===missing ? missing : [TestrunResultMessage(msg.message, msg.uri === missing ? URI("") : URI(msg.uri), coalesce(msg.line, 0), coalesce(msg.column, 0)) for msg in ti.result.messages])]) for ti in responses]
 
         deduplicated_testitems = duplicated_testitems |>
             @groupby({_.name, _.uri}) |>

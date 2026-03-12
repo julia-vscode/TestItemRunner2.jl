@@ -175,7 +175,7 @@ function run_tests(
                             _.project_details.project_uri === nothing ? nothing : string(_.project_details.project_uri),
                             string(_.project_details.env_content_hash),
                             __.option_default_imports,
-                            __.option_setup,
+                            string.(__.option_setup),
                             JuliaWorkspaces.position_at(_.textfile.content, __.code_range.start)[1],
                             JuliaWorkspaces.position_at(_.textfile.content, __.code_range.start)[2],
                             _.textfile.content.content[__.code_range],

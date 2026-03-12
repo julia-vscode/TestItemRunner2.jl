@@ -221,12 +221,14 @@ function run_tests(
                 pairs(JuliaWorkspaces.get_test_items(jw)) |>
                     @map({uri = _.first, items = _.second.testsetups}) |>
                     @mutate(
+                        project_details = JuliaWorkspaces.get_test_env(jw, _.uri),
                         textfile = JuliaWorkspaces.get_text_file(jw, _.uri)
                     ) |>
+                    @filter(_.project_details.package_uri !== nothing) |>
                     @mapmany(
                         _.items,
                         TestItemControllers.TestSetupDetail(
-                            nothing,  # packageUri
+                            string(_.project_details.package_uri),
                             string(__.name),
                             string(__.kind),
                             string(_.uri),

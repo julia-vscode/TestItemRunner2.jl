@@ -209,7 +209,8 @@ function run_tests(
                         Dict{String,Union{String,Nothing}}(k => v isa AbstractString ? string(v) : v === nothing ? nothing : string(v) for (k,v) in i.env), #i.juliaEnv,
                         max_workers, #i.maxProcessCount,
                         i.coverage ? "Coverage" : "Normal", #i.mode,
-                        nothing #coalesce(i.coverageRootUris,nothing)
+                        nothing, #coalesce(i.coverageRootUris,nothing)
+                        :Info # Log level
                     ) for i in environments
                 ],
                 collect(values(testitems_to_run_by_id)),

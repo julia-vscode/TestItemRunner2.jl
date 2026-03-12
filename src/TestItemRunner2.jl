@@ -195,6 +195,10 @@ function run_tests(
                 end
             end
 
+            if isempty(testitems_to_run_by_id)
+                @warn "No test items to run" filter_applied=(filter !== nothing)
+            end
+
             ret = try
                 TestItemControllers.execute_testrun(
                     tic,

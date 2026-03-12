@@ -144,7 +144,9 @@ function run_tests(
     if length(testerrors) == 0  || fail_on_detection_error==false
         # Filter @testitems
         if filter !== nothing
-            filter!(i->filter((filename=uri2filepath(i.uri), name=i.detail.name, tags=i.detail.option_tags, package_name=i.env.package_name)), testitems)
+            cd(path) do
+                filter!(i->filter((filename=uri2filepath(i.uri), name=i.detail.name, tags=i.detail.option_tags, package_name=i.env.package_name)), testitems)
+            end
         end
 
         p = ProgressMeter.Progress(length(testitems)*length(environments), barlen=50, enabled=progress_ui==:bar)
